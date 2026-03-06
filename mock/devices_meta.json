@@ -1,0 +1,50 @@
+[
+  {
+    "id": "tr01",
+    "name": "1号主变",
+    "substation": "station1",
+    "image_url": "/mock/images/fire_defect.png",
+    "temperature": 85.0,
+    "oil_gas": [
+      350.0,
+      40.0,
+      15.0,
+      30.0,
+      5.0,
+      200.0,
+      700.0
+    ]
+  },
+  {
+    "id": "tr02",
+    "name": "2号主变",
+    "substation": "station1",
+    "image_url": "/mock/images/oil_leakage.png",
+    "temperature": 60.0,
+    "oil_gas": [
+      20.0,
+      10.0,
+      5.0,
+      5.0,
+      0.1,
+      100.0,
+      500.0
+    ]
+  },
+  {
+    "id": "tr03",
+    "name": "3号主变",
+    "substation": "station1",
+    "image_url": "/mock/images/normal_sample.png",
+    "temperature": 55.0,
+    "oil_gas": [
+      10.0,
+      8.0,
+      2.0,
+      1.0,
+      0.0,
+      50.0,
+      300.0
+    ]
+  }
+]

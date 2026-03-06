@@ -1,0 +1,117 @@
+@import "tailwindcss";
+
+@theme {
+  /* Dark space base */
+  --color-background: #0A0B10;
+  --color-foreground: #F8FAFC;
+
+  /* Accent & status colors */
+  --color-accent-blue: #00d0ff;
+  --color-status-green: #00FF85;
+  --color-status-yellow: #FFB800;
+  --color-status-red: #FF4D4D;
+
+  --color-primary: var(--color-accent-blue);
+  --color-primary-foreground: #0A0B10;
+
+  --color-border: rgba(255, 255, 255, 0.08);
+
+  --radius: 0.75rem;
+}
+
+@layer utilities {
+  .bg-tech-container {
+    @apply relative min-h-screen bg-background text-foreground;
+  }
+
+  .bg-grid {
+    @apply absolute inset-0 pointer-events-none;
+    background-size: 40px 40px;
+    background-image: linear-gradient(to right, rgba(0, 208, 255, 0.05) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(0, 208, 255, 0.05) 1px, transparent 1px);
+    mask-image: radial-gradient(ellipse at center, black 40%, transparent 80%);
+  }
+
+  .bg-glow-1 {
+    @apply absolute top-0 left-1/4 w-[500px] h-[500px] bg-sky-500/10 rounded-full blur-[100px] mix-blend-screen pointer-events-none;
+  }
+
+  /* Glassmorphism panel */
+  .glass-panel {
+    @apply bg-white/[0.03] backdrop-blur-md border border-white/[0.08] shadow-lg;
+  }
+
+  .text-glow {
+    text-shadow: 0 0 10px rgba(0, 208, 255, 0.5);
+  }
+
+  .led-pulse {
+    animation: pulseGlow 2s infinite cubic-bezier(0.4, 0, 0.6, 1);
+  }
+
+  .led-pulse-green {
+    box-shadow: 0 0 8px #00FF85;
+  }
+
+  .led-pulse-red {
+    box-shadow: 0 0 8px #FF4D4D;
+  }
+
+  .led-pulse-yellow {
+    box-shadow: 0 0 8px #FFB800;
+  }
+
+  .animate-flow-up {
+    animation: flowUp 20s linear infinite;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(0, 208, 255, 0.2);
+    border-radius: 2px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 208, 255, 0.4);
+  }
+}
+
+@keyframes flowUp {
+  0% {
+    transform: translateY(0);
+  }
+
+  100% {
+    transform: translateY(-50%);
+  }
+}
+
+@keyframes pulseGlow {
+
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  50% {
+    opacity: .6;
+    transform: scale(1.1);
+  }
+}
+
+* {
+  @apply border-border;
+}
+
+body {
+  @apply bg-background text-foreground;
+  font-feature-settings: "rlig" 1, "calt" 1;
+}

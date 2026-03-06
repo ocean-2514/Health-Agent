@@ -1,0 +1,29 @@
+# LLM & Agent Frameworks
+langchain
+langchain-openai
+langchain_community
+crewai
+crewai-tools
+
+# Data Science & Machine Learning
+numpy
+pandas
+scikit-learn
+torch
+torchvision
+transformers
+ultralytics
+
+# Database & Vector Store
+chromadb
+apache-iotdb
+
+# API & Web
+fastapi
+uvicorn
+pydantic
+
+# Visualization & Utils
+plotly
+pypdf
+pyyaml
