@@ -5,6 +5,12 @@ import sys
 import os
 import json
 
+from pathlib import Path
+
+project_root = str(Path(__file__).resolve().parent.parent.parent.parent)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 from Python.Src.Core.PhysicsModels import TransformerRULCalculator
 from Python.Src.Utils.LLMService import LLMService
 
@@ -41,6 +47,7 @@ class TransformerLifePredictionTool(BaseTool):
     args_schema: type[BaseModel] = LifePredictionInput
 
     def _run(self, **kwargs) -> str:
+        # print(f"[TransformerLifePredictionTool] Received input kwargs: {kwargs}")
         try:
             bdv_score = kwargs.get('oil_bdv', 2)
 
@@ -99,7 +106,10 @@ class TransformerLifePredictionTool(BaseTool):
                 elif "异常" in final_result and confidence > 0.5:
                     input_data['penalty_factor'] = min(penalty_val, 0.8)
 
+
             result = calculator.run_full_analysis(input_data)
+
+            print(f"[TransformerLifePredictionTool] Computation result: {result}")
             
             # Enhance with LLM Reasoning (Refined Prompt)
             llm_service = LLMService()
@@ -121,6 +131,7 @@ class TransformerLifePredictionTool(BaseTool):
             """
             
             reasoning = llm_service.generate_response(prompt)
+            # print(f"[TransformerLifePredictionTool] LLM reasoning generated: {reasoning}")
             result["diagnosis_summary"] = reasoning
             result["uncertainty_analysis"] = "基于大模型实时推演得到的不确定性评估。综合考虑油品衰变速率与环境负荷随机性，RUL 预测值在 ±1.5 年区间内波动。"
 
@@ -134,3 +145,6 @@ class TransformerLifePredictionTool(BaseTool):
                 "diagnosis_summary": f"计算模块内部错误: {str(e)}",
                 "uncertainty_analysis": {}
             }, ensure_ascii=False)
+
+if __name__ == "__main__":
+    print("Transformer Life Prediction Tool Ready.")

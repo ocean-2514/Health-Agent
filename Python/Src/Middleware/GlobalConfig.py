@@ -32,3 +32,6 @@ class ConfigManager:
 
 # Pre-instantiate singleton instance
 GlobalConfig = ConfigManager()
+
+# config = GlobalConfig.config
+# print(config.get("Defects").get("ModelWeights"))

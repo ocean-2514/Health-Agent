@@ -196,3 +196,4 @@ if __name__ == "__main__":
     # Quick test
     service = InferenceService()
     print("InferenceService initialized.")
+    print(service.infer_log("变压器发生了严重的过热现象，可能存在起火风险。"))

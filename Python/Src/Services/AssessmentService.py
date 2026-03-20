@@ -5,11 +5,18 @@ from pathlib import Path
 from pydantic import BaseModel
 from typing import Dict, List, Optional
 
-from Src.Agent.DefectIdentificationAgent import DefectIdentificationAgent
-from Src.Agent.LifecycleDeductionAgent import TransformerLifePredictionTool
-from Src.Agent.FaultExpertAgent import FaultAnalyticEngine
-from Src.Synergy.IotDBTool import IotDBTool
-from Src.Utils.Parser import RobustParser
+import sys
+from pathlib import Path
+
+project_root = str(Path(__file__).resolve().parent.parent.parent.parent)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+from Python.Src.Agent.DefectIdentificationAgent import DefectIdentificationAgent
+from Python.Src.Agent.LifecycleDeductionAgent import TransformerLifePredictionTool
+from Python.Src.Agent.FaultExpertAgent import FaultAnalyticEngine
+from Python.Src.Synergy.IotDBTool import IotDBTool
+from Python.Src.Utils.Parser import RobustParser
 
 class AssessmentService:
     def __init__(self):
@@ -170,10 +177,12 @@ class AssessmentService:
         
         # 1. IoTDB fetch (Real/Mocked dependent on Tool config)
         scoring_trends = self.iotdb_tool.get_all_scoring_data()
+        # print(f"[AssessmentService] Fetched scoring trends for {equipment_id}: {scoring_trends}")
 
         # 2. Defect Identification Integration
         defect_res = self.run_defect_identification(input_data)
         defect_info = defect_res.get("final_fusion_result", {})
+        # print(f"[AssessmentService] Defect identification result for {equipment_id}: {defect_info}")
         
         # 3. Physics Model RUL Calculation (Pass defect info)
         input_with_defect = {**input_data, "defect_info": defect_info}
@@ -199,3 +208,9 @@ class AssessmentService:
             "dga_data": scoring_trends
         }
         return self._clean_numpy(response)
+
+if __name__ == "__main__":
+    print("Assessment Service Ready.")
+    service = AssessmentService()
+    input_data = {'id': 'tr01', 'substation_id': 'station1', 'oil_bdv': 2, 'oil_water': 2, 'oil_acid': 1, 'oil_ift': 2, 'dga_h2': 2, 'dga_ch4': 2, 'dga_co': 1, 'dga_co2': 1, 'dga_c2h4': 1, 'dga_c2h6': 1, 'dga_c2h2': 1, 'furan_level': 'A', 'future_load': 0.8, 'ambient_temp': 25.0, 'moisture': None, 'penalty_factor': 1.0}
+    print(service.run_health_assessment(input_data)["diagnosis_summary"])

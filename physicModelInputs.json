@@ -1,0 +1,24 @@
+{
+  "oil": {
+    "bdv": 2,
+    "water": null,
+    "acid": null,
+    "ift": null
+  },
+  "dga": {
+    "H2": null,
+    "CH4": null,
+    "CO": null,
+    "CO2": null,
+    "C2H4": null,
+    "C2H6": null,
+    "C2H2": null
+  },
+  "furan": {
+    "level": null
+  },
+  "future_load": null,
+  "ambient_temp": null,
+  "moisture": 2.2,
+  "penalty_factor": 1.0
+}

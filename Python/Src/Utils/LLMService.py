@@ -6,7 +6,7 @@ class LLMService:
     """
     Utility to interact with local Ollama API for real AI reasoning.
     """
-    def __init__(self, base_url="http://localhost:11434", default_model="qwen2.5:7b"):
+    def __init__(self, base_url="http://localhost:11434", default_model="gpt-oss:120b-cloud"):
         self.base_url = f"{base_url}/api/generate"
         self.default_model = default_model
 

@@ -1,0 +1,52 @@
+{
+  "id": "tr01",
+  "substation": "station1",
+  "defect_info": {
+    "final_result_en": "fire",
+    "final_result_cn": "起火",
+    "final_confidence": 0.101,
+    "is_definite": false,
+    "is_normal": false,
+    "is_fault": true,
+    "unknown_mass": 0.0001,
+    "decision_note": "【故障高度警惕】正常项仍被单项显著故障强制覆盖，最高故障质量(0.1010)，严防漏报。 (置信度 0.1010 低于阈值 0.5)",
+    "warnings": [],
+    "all_mass_en": {
+      "overheating": 0.0,
+      "discharge": 0.0,
+      "moisture": 0.0,
+      "solid_aging": 0.0,
+      "fire": 0.101,
+      "oil_leakage": 0.0,
+      "foreign_body": 0.0,
+      "damage": 0.0,
+      "normal": 0.8989
+    },
+    "all_mass_cn": {
+      "过热": 0.0,
+      "放电": 0.0,
+      "受潮": 0.0,
+      "固体绝缘老化": 0.0,
+      "起火": 0.101,
+      "漏油": 0.0,
+      "异物": 0.0,
+      "破损": 0.0,
+      "设备正常": 0.8989
+    },
+    "sorted_mass_cn": {
+      "设备正常": 0.8989,
+      "起火": 0.101,
+      "过热": 0.0,
+      "放电": 0.0,
+      "受潮": 0.0,
+      "固体绝缘老化": 0.0,
+      "漏油": 0.0,
+      "异物": 0.0,
+      "破损": 0.0
+    },
+    "fusion_config": {
+      "confidence_threshold": 0.5,
+      "unknown_threshold": 0.3
+    }
+  }
+}

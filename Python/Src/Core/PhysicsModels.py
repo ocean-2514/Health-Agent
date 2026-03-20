@@ -146,19 +146,26 @@ class TransformerRULCalculator:
         return {"x": real_years, "y": y_hi}
 
     def run_full_analysis(self, input_data):
+        print("[TransformerLifePredictionTool] Running full analysis with input data:", input_data)
         hi = self.calculate_health_index(
             input_data.get('oil', {}), input_data.get('dga', {}), input_data.get('furan', {})
         )
+        print("run_full_analysis: calculated health index:", hi)
         age = self.calculate_apparent_age(hi)
+        print(f"[TransformerLifePredictionTool] Calculated health index: {hi}, apparent age: {age} years")
         dp = self.calculate_current_dp(age)
+        print(f"[TransformerLifePredictionTool] Calculated current DP: {dp} kV")
         K = input_data.get('future_load', 0.8)
         Ta = input_data.get('ambient_temp', 20.0)
         M = input_data.get('moisture', 1.5)
         P_factor = input_data.get('penalty_factor', 1.0)
 
         ths = self.calculate_hotspot_temp(Ta, K)
+        print(f"[TransformerLifePredictionTool] Calculated hotspot temperature: {ths} °C")
         k_fut = self.calculate_future_aging_rate(ths, M)
+        print(f"[TransformerLifePredictionTool] Calculated future aging rate: {k_fut:.2e} 1/h")
         rul = self.predict_rul(dp, k_fut, penalty_factor=P_factor)
+        print(f"[TransformerLifePredictionTool] Predicted RUL: {rul} years")
 
         # Forced overrides from external defect detection
         forced_rul = input_data.get('forced_rul')

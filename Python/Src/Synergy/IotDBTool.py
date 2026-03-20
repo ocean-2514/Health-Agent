@@ -25,7 +25,7 @@ class IotDBTool(BaseTool):
     
     # We load configuration from GlobalConfig instead of hardcoding
     db_config: ClassVar[dict] = GlobalConfig.config.get("Database", {}).get("IoTDB", {})
-    mode: str = "real" # Set to real to perform more realistic trend generation based on physics
+    mode: str = "mock" # Set to real to perform more realistic trend generation based on physics
     substation: str = "station1"
     equipment_id: str = "tr01"
 

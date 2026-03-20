@@ -102,7 +102,9 @@ class FaultAnalysisTool(BaseTool):
             trends = json.loads(dga_json_str)
             engine = FaultAnalyticEngine()
             result = engine.analyze_fault_probability(trends)
+            analysis = engine.get_detailed_fault_analysis(result, trends)
             advice = engine.get_expert_advice(result)
+            result['detailed_analysis'] = analysis
             result['expert_maintenance_advice'] = advice
             return json.dumps(result, ensure_ascii=False, indent=2)
         except Exception as e:
