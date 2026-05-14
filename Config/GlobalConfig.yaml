@@ -4,9 +4,9 @@
 LLM:
   # 本地模型配置 (推荐内网部署使用)
   Local:
-    BaseURL: "http://localhost:11434/v1"  # Ollama 默认地址
+    BaseURL: "http://localhost:11434"  # Ollama 默认地址
     APIKey: "ollama"                     # Ollama 不需要真实 Key
-    ModelName: "qwen2.5:7b"              # 替换为您本地部署的模型名
+    ModelName: "gpt-oss:120b-cloud"              # 替换为您本地部署的模型名
     Temperature: 0.1
     
   # 云端 API 配置 (测试使用)
