@@ -8,6 +8,8 @@ LLM:
     APIKey: "ollama"                     # Ollama 不需要真实 Key
     ModelName: "gpt-oss:120b-cloud"              # 替换为您本地部署的模型名
     Temperature: 0.1
+    Timeout: 90                           # 单次请求超时秒数 (大模型推理较慢)
+    MaxRetries: 2                         # 瞬时失败 (网络/超时) 重试次数, 指数退避
     
   # 云端 API 配置 (测试使用)
   OpenAI:

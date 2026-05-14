@@ -130,8 +130,8 @@ class TransformerLifePredictionTool(BaseTool):
             输出要求：保持学术严谨性与运维指导价值。如果存在重大缺陷，必须在结论中首要强调。
             """
             
-            # reasoning = llm_service.generate_response(prompt)
-            reasoning = "1. 现状评估：融合判定为起火，置信度0.10，异常强度低，设备仍可运行，需进一步核实。  \n\n2. 证据链分析：日志报轻微过热，持续短；油色谱芳烃轻升未超阈；视觉捕烟雾特征但置信度低，三者共同构成低置信火灾提示。  \n\n3. 建议措施：①现场目视+红外热像复核；②抽油样复检并比对基准；③确认异常后局部降压、启动冷却并准备灭火；④完成后更新模型阈值。"
+            reasoning = llm_service.generate_response(prompt)
+            # reasoning = "1. 现状评估：融合判定为起火，置信度0.10，异常强度低，设备仍可运行，需进一步核实。  \n\n2. 证据链分析：日志报轻微过热，持续短；油色谱芳烃轻升未超阈；视觉捕烟雾特征但置信度低，三者共同构成低置信火灾提示。  \n\n3. 建议措施：①现场目视+红外热像复核；②抽油样复检并比对基准；③确认异常后局部降压、启动冷却并准备灭火；④完成后更新模型阈值。"
             print(f"[TransformerLifePredictionTool] LLM reasoning generated: {reasoning}")
             result["diagnosis_summary"] = reasoning
             result["uncertainty_analysis"] = "基于大模型实时推演得到的不确定性评估。综合考虑油品衰变速率与环境负荷随机性，RUL 预测值在 ±1.5 年区间内波动。"

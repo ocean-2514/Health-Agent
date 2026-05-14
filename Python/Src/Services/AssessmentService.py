@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 import numpy as np
 from pathlib import Path
 from pydantic import BaseModel
@@ -97,8 +98,8 @@ class AssessmentService:
         img_res = inference_service.infer_image(test_image)
         
         # 4. Save Path for compatibility with existing agent logic
-        # Using /tmp to avoid triggering uvicorn reload on file changes
-        save_path = "/tmp/fusion_output.json"
+        # Use system temp dir (cross-platform) to avoid triggering uvicorn reload on file changes
+        save_path = os.path.join(tempfile.gettempdir(), "fusion_output.json")
         
         try:
             # We still run evidence fusion, but we can now use real-time inputs

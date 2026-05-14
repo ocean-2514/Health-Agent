@@ -70,8 +70,8 @@ class DefectIdentificationAgent:
                 字数控制在200字以内，语言专业严谨。
                 """
                 
-                # reasoning = self.llm_service.generate_response(prompt)
-                reasoning = "1. 现状评估：融合判定为起火，置信度0.10，异常强度低，设备仍可运行，需进一步核实。  \n\n2. 证据链分析：日志报轻微过热，持续短；油色谱芳烃轻升未超阈；视觉捕烟雾特征但置信度低，三者共同构成低置信火灾提示。  \n\n3. 建议措施：①现场目视+红外热像复核；②抽油样复检并比对基准；③确认异常后局部降压、启动冷却并准备灭火；④完成后更新模型阈值。"
+                reasoning = self.llm_service.generate_response(prompt)
+                # reasoning = "1. 现状评估：融合判定为起火，置信度0.10，异常强度低，设备仍可运行，需进一步核实。  \n\n2. 证据链分析：日志报轻微过热，持续短；油色谱芳烃轻升未超阈；视觉捕烟雾特征但置信度低，三者共同构成低置信火灾提示。  \n\n3. 建议措施：①现场目视+红外热像复核；②抽油样复检并比对基准；③确认异常后局部降压、启动冷却并准备灭火；④完成后更新模型阈值。"
                 result_data["ai_reasoning"] = reasoning
 
                 print(f"[DefectIdentificationAgent] LLM reasoning generated: {reasoning}")
