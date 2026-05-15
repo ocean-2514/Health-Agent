@@ -27,3 +27,10 @@ pydantic
 plotly
 pypdf
 pyyaml
+
+# MCP Server (Phase 2)
+fastmcp
+
+# Testing
+pytest
+pytest-asyncio
