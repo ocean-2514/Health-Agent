@@ -31,6 +31,9 @@ pyyaml
 # MCP Server (Phase 2)
 fastmcp
 
+# Multi-Agent Orchestration (Phase 3)
+langgraph
+
 # Testing
 pytest
 pytest-asyncio
