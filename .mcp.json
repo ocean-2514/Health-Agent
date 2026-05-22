@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "healthagent": {
+      "type": "stdio",
+      "command": "D:\\Users\\mingj\\anaconda3\\envs\\healthAgent\\python.exe",
+      "args": [
+        "D:\\code\\AI\\project\\HealthAgent\\Python\\MCPMain.py"
+      ],
+      "env": {}
+    }
+  }
+}
