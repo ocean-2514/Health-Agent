@@ -7,8 +7,8 @@
 ## 一、前置条件
 
 - Python 3.12+ 在 conda 环境 `healthAgent` 中（含 torch、fastmcp 等依赖）
-- Ollama 在 `http://localhost:11434` 监听，模型 `gpt-oss:120b-cloud` 已 pull
-  （或修改 [Config/GlobalConfig.yaml](../Config/GlobalConfig.yaml) 改成你自己的本地模型）
+- Ollama 在 `http://localhost:11434` 监听
+  （可修改 [Config/GlobalConfig.yaml](../Config/GlobalConfig.yaml) 改成你自己的本地模型）
 - IoTDB 可选；不开也能跑（自动回落 mock 模式）
 
 ## 二、Claude Desktop 配置
