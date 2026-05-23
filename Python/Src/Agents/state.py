@@ -12,6 +12,14 @@ explainability (it can be rendered as a sequence diagram). Because the
 three inference nodes run in parallel and all append to it, the field
 carries an ``operator.add`` reducer so LangGraph concatenates concurrent
 writes instead of rejecting them. ``errors`` is reduced the same way.
+
+Phase 4 adds the ``artifacts`` field — an OPEN namespace. The typed fields
+above are the closed core for the four built-in agents; dynamically
+loaded plugin / remote agents have no field of their own, so they read
+and write ``artifacts[key]`` instead. ``AgentCard.consumes`` / ``produces``
+name either a typed field or an artifact key — the router treats both
+uniformly (see registry.py). This is what lets an agent be added at
+runtime without touching the state schema.
 """
 from __future__ import annotations
 
@@ -74,6 +82,44 @@ def make_message(
 
 
 # ---------------------------------------------------------------------------
+# Artifact — one entry in the open namespace
+# ---------------------------------------------------------------------------
+
+class Artifact(BaseModel):
+    """A typed envelope around a value produced by a plugin / remote agent.
+
+    Built-in agents write their own typed state fields; everything loaded
+    at runtime writes ``Artifact`` entries into ``DiagnosisState.artifacts``
+    instead. The envelope (producer / schema_name / version) keeps the open
+    region self-describing — and maps cleanly onto the A2A ``Artifact`` type
+    when an agent is reached over the network.
+    """
+    key: str = Field(..., description="artifacts 字典里的键")
+    producer: str = Field(..., description="产出该 artifact 的 agent 名")
+    schema_name: str = Field("raw", description="payload 的逻辑类型名")
+    version: int = 1
+    payload: Any = Field(..., description="实际数据 (应可 JSON 序列化)")
+    confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
+    created_at: str = Field(
+        default_factory=lambda: datetime.now().isoformat(timespec="seconds")
+    )
+
+
+def merge_artifacts(
+    left: Dict[str, "Artifact"], right: Dict[str, "Artifact"]
+) -> Dict[str, "Artifact"]:
+    """Reducer for the ``artifacts`` channel: last write wins per key.
+
+    Needed because parallel agents may emit artifacts in the same LangGraph
+    superstep; without a reducer LangGraph rejects concurrent writes to a
+    shared key.
+    """
+    merged = dict(left or {})
+    merged.update(right or {})
+    return merged
+
+
+# ---------------------------------------------------------------------------
 # The shared blackboard
 # ---------------------------------------------------------------------------
 
@@ -103,6 +149,12 @@ class DiagnosisState(BaseModel):
     # --- Decision Agent output ---
     rul_result: Optional[RULResult] = None
     final_report: Optional[str] = None
+
+    # --- open namespace (Phase 4): plugin / remote agents read & write here ---
+    artifacts: Annotated[Dict[str, Artifact], merge_artifacts] = Field(
+        default_factory=dict,
+        description="动态加载的 agent 的产出物, 按 key 寻址",
+    )
 
     # --- control + communication ---
     next_agent: Optional[str] = Field(

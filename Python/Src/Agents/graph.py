@@ -2,16 +2,22 @@
 
 Topology::
 
-    START -> coordinator --(route)--> data | [bert,cnn,yolo] | decision | END
+    START -> coordinator --(route)--> data | [bert,cnn,yolo] | decision
+                                      | <plugin/remote agents> | END
     data                       -> coordinator
     bert / cnn / yolo (parallel)-> fusion
     fusion                      -> dga
     dga                         -> coordinator
     decision                    -> coordinator
+    <each plugin/remote agent>  -> coordinator
 
 The Coordinator is the hub: every worker agent returns to it, and a single
-conditional edge maps its routing decision onto the next node(s). The
-``diagnosis`` decision fans out to the three parallel inference nodes.
+conditional edge maps its routing decision onto the next node(s). The four
+built-in agents are wired by hand (the Diagnosis agent fans out to three
+parallel inference nodes). Any agent registered with a *runnable* — a local
+plugin or a remote A2A proxy — is wired generically: one node, one edge
+back to the Coordinator. Adding such an agent needs no change here beyond
+it being present in the registry.
 
 Public entry point: ``run_diagnosis``.
 """
@@ -19,7 +25,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from langgraph.graph import END, START, StateGraph
 
@@ -41,13 +47,15 @@ from Python.Src.Agents.diagnosis_agent import (
 from Python.Src.Agents.registry import AgentRegistry
 from Python.Src.Agents.state import DiagnosisState
 
+_BUILTIN_NODES = {"coordinator", "data", "bert", "cnn", "yolo", "fusion", "dga", "decision"}
+
 
 def build_default_registry() -> AgentRegistry:
-    """Statically populate the registry with the four built-in agents.
+    """Populate a registry with just the three built-in worker agents.
 
-    A future plugin loader would call ``registry.register(card)`` here at
-    runtime; the rest of the system does not care how the registry is
-    filled.
+    Plugin agents are added on top of this by ``loader.load_plugins``;
+    remote A2A agents by the remote loader. The rest of the system does not
+    care how the registry was filled.
     """
     reg = AgentRegistry()
     reg.register(DATA_CARD)
@@ -56,21 +64,26 @@ def build_default_registry() -> AgentRegistry:
     return reg
 
 
-def _route(state: DiagnosisState) -> Union[str, list]:
+def _route(state: DiagnosisState) -> Union[str, List[str]]:
     """Conditional-edge function: map the Coordinator's decision to node(s)."""
     nxt = state.next_agent
     if nxt == DONE or nxt is None:
         return END
     if nxt == "diagnosis":
         return ["bert", "cnn", "yolo"]  # parallel fan-out
-    return nxt  # "data" or "decision"
+    return nxt  # "data" | "decision" | any plugin / remote agent name
 
 
 def build_graph(registry: Optional[AgentRegistry] = None):
-    """Build and compile the multi-agent StateGraph."""
+    """Build and compile the multi-agent StateGraph.
+
+    Built-in agents are wired by hand; every agent in ``registry`` that
+    carries a runnable (plugin / remote) is wired generically.
+    """
     registry = registry or build_default_registry()
     g = StateGraph(DiagnosisState)
 
+    # --- built-in agents: hand-wired (Diagnosis fans out to bert/cnn/yolo) ---
     g.add_node("coordinator", make_coordinator_node(registry))
     g.add_node("data", data_node)
     g.add_node("bert", bert_node)
@@ -80,11 +93,23 @@ def build_graph(registry: Optional[AgentRegistry] = None):
     g.add_node("dga", dga_node)
     g.add_node("decision", decision_node)
 
+    # --- plugin / remote agents: generic wiring (coordinator <-> agent) ---
+    extra_targets: List[str] = []
+    for card in registry.ordered():
+        runnable = registry.runnable_of(card.name)
+        if runnable is None:
+            continue  # a built-in — already wired above
+        if card.name in _BUILTIN_NODES:
+            raise ValueError(f"plugin agent name collides with a built-in: {card.name!r}")
+        g.add_node(card.name, runnable.run)  # type: ignore[attr-defined]
+        g.add_edge(card.name, "coordinator")
+        extra_targets.append(card.name)
+
     g.add_edge(START, "coordinator")
     g.add_conditional_edges(
         "coordinator",
         _route,
-        ["data", "bert", "cnn", "yolo", "decision", END],
+        ["data", "bert", "cnn", "yolo", "decision", END] + extra_targets,
     )
     g.add_edge("data", "coordinator")
     g.add_edge("bert", "fusion")
@@ -110,16 +135,19 @@ def run_diagnosis(
     equipment_id: str = "tr01",
     substation: str = "station1",
     params: Optional[Dict[str, Any]] = None,
+    registry: Optional[AgentRegistry] = None,
 ) -> DiagnosisState:
     """Run the full multi-agent diagnosis and return the final state.
 
-    ``params`` overrides the default health-assessment inputs.
+    ``params`` overrides the default health-assessment inputs. ``registry``
+    lets a caller supply a registry already extended with plugin / remote
+    agents; when omitted only the three built-in agents run.
     """
     raw = dict(_DEFAULT_PARAMS)
     if params:
         raw.update(params)
 
-    graph = build_graph()
+    graph = build_graph(registry)
     initial = DiagnosisState(
         equipment_id=equipment_id, substation=substation, raw_input=raw,
     )

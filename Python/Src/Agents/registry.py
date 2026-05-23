@@ -5,15 +5,19 @@ it consumes and produces. The Coordinator routes by traversing the
 registry rather than a hard-coded if/elif chain, so the control flow is
 already structurally dynamic.
 
-Today the registry is populated statically (see ``graph.build_default_registry``).
-But ``AgentRegistry.register()`` is exactly the entry point a future plugin
-loader — or an A2A adapter wrapping a remote agent — would call at runtime.
-When the state later grows an open artifact namespace, ``consumes`` /
-``produces`` would name artifact keys instead of fixed fields, with no
-change to the routing algorithm.
+The built-in agents are registered statically (see
+``graph.build_default_registry``); plugin agents are registered at startup
+by ``loader.PluginLoader``; remote agents are registered by the A2A remote
+loader. All three paths funnel through ``AgentRegistry.register()`` — the
+rest of the platform does not care how a card got there.
+
+``consumes`` / ``produces`` name either a typed ``DiagnosisState`` field or
+an open ``artifacts`` key; ``AgentCard`` checks both uniformly, so a plugin
+that only touches the artifact namespace routes exactly like a built-in.
 
 The ``AgentCard`` schema is intentionally close to an A2A *Agent Card*
-(name / description / skills / endpoint) so going remote is incremental.
+(name / description / skills / endpoint). ``endpoint`` is ``None`` for an
+in-process agent and a URL for a remote A2A agent.
 """
 from __future__ import annotations
 
@@ -27,6 +31,18 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from Python.Src.Agents.state import DiagnosisState
+
+
+def _has(state: DiagnosisState, key: str) -> bool:
+    """True if ``key`` is populated — as a typed state field OR an artifact.
+
+    This single check is what makes the closed core fields and the open
+    artifact namespace route uniformly.
+    """
+    value = getattr(state, key, None)
+    if value is not None:
+        return True
+    return key in (getattr(state, "artifacts", None) or {})
 
 
 @dataclass
@@ -45,29 +61,43 @@ class AgentCard:
     endpoint: Optional[str] = None
 
     def is_runnable(self, state: DiagnosisState) -> bool:
-        """True when every consumed field is populated → the agent can run."""
-        return all(getattr(state, f, None) is not None for f in self.consumes)
+        """True when every consumed key is populated → the agent can run."""
+        return all(_has(state, k) for k in self.consumes)
 
     def is_satisfied(self, state: DiagnosisState) -> bool:
-        """True when every produced field is populated → nothing left to do."""
+        """True when every produced key is populated → nothing left to do."""
         if not self.produces:
             return False
-        return all(getattr(state, f, None) is not None for f in self.produces)
+        return all(_has(state, k) for k in self.produces)
 
 
 class AgentRegistry:
-    """Ordered collection of ``AgentCard`` manifests."""
+    """Ordered collection of ``AgentCard`` manifests (+ optional runnables)."""
 
     def __init__(self) -> None:
         self._cards: Dict[str, AgentCard] = {}
         self._order: List[str] = []
+        self._runnables: Dict[str, object] = {}
 
-    def register(self, card: AgentCard) -> None:
+    def register(self, card: AgentCard, runnable: Optional[object] = None) -> None:
         """Add (or replace) an agent. Insertion order is preserved and is the
-        order the Coordinator scans — register agents in dependency order."""
+        order the Coordinator scans — register agents in dependency order.
+
+        ``runnable`` is the object whose ``run(state)`` the graph calls for a
+        generically-dispatched agent (local plugin / remote A2A proxy). The
+        four built-in agents pass ``None`` — they are wired into the graph by
+        hand (the Diagnosis agent in particular fans out to parallel nodes).
+        """
         if card.name not in self._cards:
             self._order.append(card.name)
         self._cards[card.name] = card
+        if runnable is not None:
+            self._runnables[card.name] = runnable
+
+    def runnable_of(self, name: str) -> Optional[object]:
+        """The ``run``-able object for a generically-dispatched agent, or
+        ``None`` for a built-in agent that the graph wires by hand."""
+        return self._runnables.get(name)
 
     def get(self, name: str) -> AgentCard:
         return self._cards[name]
