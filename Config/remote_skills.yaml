@@ -1,0 +1,29 @@
+# Remote A2A agents the Supervisor surfaces as skills.
+#
+# Each entry is wrapped as a RemoteA2ASkill and shows up alongside local
+# skills (transformer_diagnosis, history_lookup). The LLM decides when to
+# call based on `description`, so be specific about the remote agent's
+# capability and when to prefer it over a local skill.
+#
+# Probe behaviour (relaxed): if the remote endpoint is unreachable at
+# startup, we log a warning and still register the skill — the call will
+# fail at run time with success=false, which the LLM can report. Set
+# `enabled: false` to suppress without deleting.
+#
+# Demo entry: a2a_demo_server.fake_search_server (run separately with
+#     python -m a2a_demo_server.fake_search_server
+# from the repo root) — returns canned defect knowledge.
+
+remote_skills:
+  - name: defect_kb_search
+    description: >-
+      Look up transformer defect knowledge entries by symptom keywords
+      (DGA gas patterns, vibration signatures, partial discharge bands,
+      过热/局放/接地 等). Use when the user asks for evidence,
+      precedent cases, or standards references for a specific defect or
+      symptom — NOT for running a fresh transformer diagnosis (use
+      transformer_diagnosis for that).
+    url: http://127.0.0.1:9001
+    timeout_s: 30
+    enabled: true
+    probe: true

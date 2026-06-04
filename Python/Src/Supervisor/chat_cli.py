@@ -11,14 +11,21 @@ follow-up questions like ``"那它的 RUL 是多少?"`` work without re-running
 the diagnosis.
 
 Commands:
-  /new                 start a fresh session
-  /id                  print the current session id
-  /list                list recent sessions (newest first)
-  /switch <id>         switch to an existing session
-  /delete <id>         delete a session (if it's the current one, auto-creates a new one)
-  /history             dump the current session history
-  /skills              list registered skills
-  /quit                exit
+  /new                  start a fresh session
+  /id                   print the current session id
+  /list                 list recent sessions (newest first)
+  /switch <id>          switch to an existing session
+  /delete <id>          delete a session (if it's the current one, auto-creates a new one)
+  /history              dump the current session history
+  /skills               list registered skills (disabled shown as 'name [disabled]')
+  /register <class_path>  hot-register a Skill class (no-arg constructor)
+  /unregister <name>    remove a skill
+  /enable <name>        re-enable a previously disabled skill
+  /disable <name>       hide a skill from the LLM without removing it
+  /load_dir <path>      scan a directory for files exporting SKILL/SKILLS
+  /register_remote <url> [name]   hot-register a remote A2A agent; probes card if name omitted
+  /load_remote_yaml [path]        load remote skills from YAML (default Config/remote_skills.yaml)
+  /quit                 exit
 """
 from __future__ import annotations
 
@@ -46,9 +53,17 @@ def _build_default_supervisor() -> Supervisor:
 
 def _print_help() -> None:
     print(
-        "commands: /new  /list  /switch <id>  /delete <id>  "
-        "/id  /history  /skills  /quit"
+        "session: /new  /list  /switch <id>  /delete <id>  /id  /history\n"
+        "skills:  /skills  /register <class_path>  /unregister <name>  "
+        "/enable <name>  /disable <name>  /load_dir <path>\n"
+        "remote:  /register_remote <url> [name]  /load_remote_yaml [path]\n"
+        "other:   /quit"
     )
+
+
+def _arg(line: str) -> str:
+    parts = line.split(None, 1)
+    return parts[1].strip() if len(parts) == 2 else ""
 
 
 def main() -> int:
@@ -129,7 +144,84 @@ def main() -> int:
                 print(f"  [{row['role']:>9}] {row['content']}")
             continue
         if user_input == "/skills":
-            print(supervisor.skill_names)
+            active = supervisor.skill_names
+            disabled = set(supervisor.disabled_skill_names)
+            display = []
+            for name in supervisor.all_skill_names:
+                display.append(f"{name} [disabled]" if name in disabled else name)
+            print(display if display else "(无)")
+            continue
+        if user_input.startswith("/register"):
+            class_path = _arg(user_input)
+            if not class_path:
+                print("用法: /register <class_path>")
+                continue
+            try:
+                name = supervisor.register_skill_from_config(
+                    {"class_path": class_path, "enabled": True}
+                )
+                print(f"已注册: {name}")
+            except Exception as e:  # noqa: BLE001
+                print(f"[error] {e}")
+            continue
+        if user_input.startswith("/unregister"):
+            name = _arg(user_input)
+            if not name:
+                print("用法: /unregister <name>")
+                continue
+            print(f"已移除: {name}" if supervisor.unregister_skill(name)
+                  else f"未找到: {name}")
+            continue
+        if user_input.startswith("/enable"):
+            name = _arg(user_input)
+            if not name:
+                print("用法: /enable <name>")
+                continue
+            print(f"已启用: {name}" if supervisor.enable_skill(name)
+                  else f"未变化 (不存在或已启用): {name}")
+            continue
+        if user_input.startswith("/disable"):
+            name = _arg(user_input)
+            if not name:
+                print("用法: /disable <name>")
+                continue
+            print(f"已禁用: {name}" if supervisor.disable_skill(name)
+                  else f"未变化 (不存在或已禁用): {name}")
+            continue
+        if user_input.startswith("/load_dir"):
+            path = _arg(user_input)
+            if not path:
+                print("用法: /load_dir <path>")
+                continue
+            try:
+                added = supervisor.register_skills_from_path(path)
+                print(f"新增 {len(added)} 个 skill: {added}" if added
+                      else "未发现可加载 skill (需要模块级 SKILL = ... 或 SKILLS = [...])")
+            except Exception as e:  # noqa: BLE001
+                print(f"[error] {e}")
+            continue
+        if user_input.startswith("/register_remote"):
+            rest = _arg(user_input)
+            if not rest:
+                print("用法: /register_remote <url> [name]")
+                continue
+            tokens = rest.split(None, 1)
+            url = tokens[0]
+            override_name = tokens[1].strip() if len(tokens) == 2 else None
+            try:
+                name = supervisor.register_remote_skill(url, name=override_name)
+                print(f"已注册远程: {name}  ({url})")
+            except Exception as e:  # noqa: BLE001
+                print(f"[error] {e}")
+            continue
+        if user_input.startswith("/load_remote_yaml"):
+            path = _arg(user_input) or None
+            try:
+                added = supervisor.register_remote_skills_from_yaml(path)
+                print(f"新增 {len(added)} 个远程 skill: {added}" if added
+                      else "未新增 (文件不存在 / 全部已注册 / 没有 enabled 项)")
+            except Exception as e:  # noqa: BLE001
+                print(f"[error] {e}")
             continue
         if user_input.startswith("/"):
             _print_help()

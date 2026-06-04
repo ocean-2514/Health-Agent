@@ -50,16 +50,28 @@ def _import_class(class_path: str) -> type:
         ) from e
 
 
-def load_skills(yaml_path: Optional[Path] = None) -> List[Skill]:
-    """Load every enabled skill declared in ``yaml_path`` and return them.
+def load_skills(
+    yaml_path: Optional[Path] = None,
+    remote_yaml_path: Optional[Path] = None,
+    include_remote: bool = True,
+) -> List[Skill]:
+    """Load local skills from YAML, plus (by default) remote A2A skills.
 
-    YAML shape::
+    Local skills come from ``Config/skills.yaml``; remote A2A skills come
+    from ``Config/remote_skills.yaml`` (optional file — absent = no
+    remotes, not an error). Both lists are concatenated and returned in
+    one flat list; the Supervisor doesn't distinguish them once
+    constructed.
+
+    YAML shape (local)::
 
         skills:
           - name: transformer_diagnosis
             class_path: Python.Src.Supervisor.skills.transformer_diagnosis.TransformerDiagnosisSkill
             enabled: true
             init_kwargs: {}      # optional, passed to the class constructor
+
+    See ``Python.Src.Supervisor.remote.loader`` for the remote-skill YAML shape.
     """
     path = Path(yaml_path or DEFAULT_SKILLS_YAML)
     if not path.exists():
@@ -97,4 +109,12 @@ def load_skills(yaml_path: Optional[Path] = None) -> List[Skill]:
 
     if not skills:
         raise SkillLoadError(f"{path} declared no enabled skills")
+
+    if include_remote:
+        # Import lazily: avoids forcing httpx / a2a-sdk imports on callers
+        # that only want local skills (e.g. unit tests for a single skill).
+        from Python.Src.Supervisor.remote.loader import load_remote_skills
+
+        skills.extend(load_remote_skills(yaml_path=remote_yaml_path))
+
     return skills
