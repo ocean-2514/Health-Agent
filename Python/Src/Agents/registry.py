@@ -11,61 +11,102 @@ by ``loader.PluginLoader``; remote agents are registered by the A2A remote
 loader. All three paths funnel through ``AgentRegistry.register()`` — the
 rest of the platform does not care how a card got there.
 
-``consumes`` / ``produces`` name either a typed ``DiagnosisState`` field or
-an open ``artifacts`` key; ``AgentCard`` checks both uniformly, so a plugin
-that only touches the artifact namespace routes exactly like a built-in.
+``consumes`` / ``produces`` carry one of two shapes:
+
+  * a bare ``str`` — names a typed ``DiagnosisState`` field (built-in
+    agents) or an artifact key with no schema enforcement (legacy plugins);
+  * an ``ArtifactSpec(key, schema_name, version)`` — names an open
+    ``artifacts`` slot and the contract its payload must satisfy. The
+    router uses (key, schema_name, version) to decide presence; a wrong
+    schema or older version is **silently treated as absent**, so the
+    agent simply does not get routed (no exception, no broken pipeline).
 
 The ``AgentCard`` schema is intentionally close to an A2A *Agent Card*
 (name / description / skills / endpoint). ``endpoint`` is ``None`` for an
 in-process agent and a URL for a remote A2A agent.
+
+``AgentRegistry.validate()`` does a *deferred* satisfiability sweep:
+every ``ArtifactSpec`` in any agent's ``consumes`` must be produced by
+some registered agent. Call it once all registrations are done (the
+platform builder does — see ``loader.build_platform_registry``). Built-in
+``str`` consumes refer to typed fields written by the built-in pipeline
+and are trusted, so they are not validated here.
 """
 from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 project_root = str(Path(__file__).resolve().parents[3])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from Python.Src.Agents.state import DiagnosisState
+from Python.Src.Agents.state import ArtifactSpec, DiagnosisState
+
+# A consumes / produces entry. ``str`` names a typed field or a bare
+# artifact key (legacy); ``ArtifactSpec`` carries a schema contract.
+Requirement = Union[ArtifactSpec, str]
 
 
-def _has(state: DiagnosisState, key: str) -> bool:
-    """True if ``key`` is populated — as a typed state field OR an artifact.
+class UnsatisfiableConsumer(ValueError):
+    """A registered agent declares an ArtifactSpec input that nobody produces."""
 
-    This single check is what makes the closed core fields and the open
-    artifact namespace route uniformly.
+
+def _has(state: DiagnosisState, item: Requirement) -> bool:
+    """True if ``item`` is populated in ``state`` under its declared contract.
+
+    Routing rules:
+      * ``str`` — typed state field present, OR artifact key present (no
+        schema check). Keeps built-ins and legacy plugins working.
+      * ``ArtifactSpec`` — artifact present AND ``schema_name`` matches AND
+        ``version >= spec.version``. Anything else is **silently treated as
+        absent** so the agent is just not routed (per the design decision
+        on schema mismatch handling).
     """
-    value = getattr(state, key, None)
-    if value is not None:
-        return True
-    return key in (getattr(state, "artifacts", None) or {})
+    if isinstance(item, str):
+        value = getattr(state, item, None)
+        if value is not None:
+            return True
+        return item in (getattr(state, "artifacts", None) or {})
+
+    artifacts = getattr(state, "artifacts", None) or {}
+    art = artifacts.get(item.key)
+    if art is None:
+        return False
+    if art.schema_name != item.schema_name:
+        return False
+    if art.version < item.version:
+        return False
+    return True
 
 
 @dataclass
 class AgentCard:
     """Capability manifest for one agent.
 
-    ``endpoint`` is ``None`` for an in-process agent. A future remote agent
-    would carry a URL here, and the Coordinator would dispatch to it via a
-    transport adapter (MCP / A2A) instead of a direct function call.
+    ``consumes`` / ``produces`` entries are each either a bare ``str``
+    (typed field name, or a legacy artifact key with no schema check) or
+    an ``ArtifactSpec`` carrying ``(key, schema_name, version)``.
+
+    ``endpoint`` is ``None`` for an in-process agent. A remote agent
+    carries a URL here, and the platform dispatches to it via a transport
+    adapter (A2A) instead of a direct function call.
     """
     name: str
     description: str
     skills: List[str] = field(default_factory=list)
-    consumes: List[str] = field(default_factory=list)
-    produces: List[str] = field(default_factory=list)
+    consumes: List[Requirement] = field(default_factory=list)
+    produces: List[Requirement] = field(default_factory=list)
     endpoint: Optional[str] = None
 
     def is_runnable(self, state: DiagnosisState) -> bool:
-        """True when every consumed key is populated → the agent can run."""
+        """True when every consumed entry is satisfied → the agent can run."""
         return all(_has(state, k) for k in self.consumes)
 
     def is_satisfied(self, state: DiagnosisState) -> bool:
-        """True when every produced key is populated → nothing left to do."""
+        """True when every produced entry is populated → nothing left to do."""
         if not self.produces:
             return False
         return all(_has(state, k) for k in self.produces)
@@ -98,6 +139,46 @@ class AgentRegistry:
         """The ``run``-able object for a generically-dispatched agent, or
         ``None`` for a built-in agent that the graph wires by hand."""
         return self._runnables.get(name)
+
+    def _someone_produces(self, spec: ArtifactSpec) -> bool:
+        """True if any registered agent's ``produces`` covers ``spec``.
+
+        Matching rule:
+          * ``ArtifactSpec`` producer: same ``key`` + ``schema_name`` +
+            producer ``version >= spec.version``.
+          * bare ``str`` producer: matches the spec's ``key`` (legacy
+            plugin compatibility — no schema enforcement on the producer
+            side).
+        """
+        for card in self._cards.values():
+            for p in card.produces:
+                if isinstance(p, ArtifactSpec):
+                    if (
+                        p.key == spec.key
+                        and p.schema_name == spec.schema_name
+                        and p.version >= spec.version
+                    ):
+                        return True
+                elif isinstance(p, str) and p == spec.key:
+                    return True
+        return False
+
+    def validate(self) -> None:
+        """Sweep: every ArtifactSpec consumed must have a matching producer.
+
+        Order-independent — call after all registrations are done. Raises
+        ``UnsatisfiableConsumer`` for the first violation found. Bare ``str``
+        consumes are not validated (they refer to typed built-in fields
+        which are trusted).
+        """
+        for card in self._cards.values():
+            for need in card.consumes:
+                if isinstance(need, ArtifactSpec) and not self._someone_produces(need):
+                    raise UnsatisfiableConsumer(
+                        f"agent {card.name!r} consumes {need.key!r} "
+                        f"(schema {need.schema_name!r} v{need.version}), "
+                        f"but no registered agent produces it"
+                    )
 
     def get(self, name: str) -> AgentCard:
         return self._cards[name]

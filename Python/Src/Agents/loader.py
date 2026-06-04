@@ -72,5 +72,12 @@ def load_plugins(
 
 
 def build_platform_registry() -> AgentRegistry:
-    """Built-in agents + every discovered plugin — the full platform registry."""
-    return load_plugins(build_default_registry())
+    """Built-in agents + every discovered plugin — the full platform registry.
+
+    Runs ``AgentRegistry.validate()`` once everyone is in, so any
+    ArtifactSpec consumer without a matching producer fails loud right
+    here rather than at first execution.
+    """
+    registry = load_plugins(build_default_registry())
+    registry.validate()
+    return registry

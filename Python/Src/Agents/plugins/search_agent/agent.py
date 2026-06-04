@@ -14,7 +14,7 @@ from typing import Any, Dict, List
 
 from Python.Src.Agents.base import LocalPluginAgent
 from Python.Src.Agents.registry import AgentCard
-from Python.Src.Agents.state import Artifact, DiagnosisState, make_message
+from Python.Src.Agents.state import Artifact, ArtifactSpec, DiagnosisState, make_message
 
 AGENT_NAME = "search"
 
@@ -94,12 +94,21 @@ def search_defect_knowledge(verdict_cn: str) -> Dict[str, Any]:
 # Plugin wiring
 # ---------------------------------------------------------------------------
 
+# The agent's output contract — written into AgentCard.produces and used at
+# the write site so the key / schema_name / version cannot drift.
+SEARCH_NOTES = ArtifactSpec(
+    key="search_notes",
+    schema_name="DefectKnowledge",
+    version=1,
+    description="按缺陷判定检索到的运维知识 / 标准 / 处理建议条目",
+)
+
 SEARCH_CARD = AgentCard(
     name=AGENT_NAME,
     description="检索缺陷识别相关的运维知识、标准与处理规程",
     skills=["defect_knowledge_retrieval"],
     consumes=["fusion_result"],   # typed state field — runs after diagnosis
-    produces=["search_notes"],    # open artifact key
+    produces=[SEARCH_NOTES],      # typed artifact contract (key + schema + version)
 )
 
 
@@ -112,9 +121,10 @@ def search_node(state: DiagnosisState) -> dict:
 
     notes = search_defect_knowledge(verdict)
     artifact = Artifact(
-        key="search_notes",
+        key=SEARCH_NOTES.key,
         producer=AGENT_NAME,
-        schema_name="DefectKnowledge",
+        schema_name=SEARCH_NOTES.schema_name,
+        version=SEARCH_NOTES.version,
         payload=notes,
         confidence=conf,
     )
@@ -123,7 +133,7 @@ def search_node(state: DiagnosisState) -> dict:
         summary=f"检索到 {len(notes['entries'])} 条与「{verdict}」相关的运维知识",
         confidence=conf,
     )
-    return {"artifacts": {"search_notes": artifact}, "comm_log": [msg]}
+    return {"artifacts": {SEARCH_NOTES.key: artifact}, "comm_log": [msg]}
 
 
 # The object the PluginLoader looks for.

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import operator
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Optional
@@ -117,6 +118,77 @@ def merge_artifacts(
     merged = dict(left or {})
     merged.update(right or {})
     return merged
+
+
+# ---------------------------------------------------------------------------
+# ArtifactSpec — the typed contract carried in AgentCard.consumes / produces
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ArtifactSpec:
+    """A schema-aware reference to an artifact slot.
+
+    An ``AgentCard`` lists ``ArtifactSpec`` entries in ``consumes`` / ``produces``
+    instead of bare strings whenever it wants the platform to enforce a
+    payload contract (vs. matching on key alone). The router uses
+    (key, schema_name, version) to decide presence; ``consume(state, spec)``
+    raises explicitly if the live artifact violates the contract.
+
+    Mirrors the shape of an A2A skill input / output declaration so the same
+    spec can later drive a remote A2A binding without restating the contract.
+    """
+    key: str
+    schema_name: str
+    version: int = 1
+    description: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Schema contract violations (raised by ``consume``)
+# ---------------------------------------------------------------------------
+
+class ArtifactContractError(Exception):
+    """Base class for any violation of an artifact's typed contract."""
+
+
+class MissingArtifact(ArtifactContractError):
+    """The expected artifact key is not present in state.artifacts."""
+
+
+class SchemaMismatch(ArtifactContractError):
+    """The artifact exists but its schema_name does not match the contract."""
+
+
+class SchemaTooOld(ArtifactContractError):
+    """The artifact's version is older than the consumer requires."""
+
+
+def consume(state: "DiagnosisState", spec: ArtifactSpec) -> Any:
+    """Read an artifact under a typed contract; raise on any mismatch.
+
+    Agents should use this instead of ``state.artifacts[key]`` whenever they
+    declared the input as an ``ArtifactSpec`` — it turns wrong schema /
+    missing artifact into an explicit failure right at the read site instead
+    of a downstream ``AttributeError`` deep inside the agent's logic.
+
+    The router (``AgentCard.is_runnable``) already skips an agent whose
+    inputs do not satisfy the contract, so reaching this function with a
+    mismatch usually means a bug — fail loud.
+    """
+    art = (state.artifacts or {}).get(spec.key)
+    if art is None:
+        raise MissingArtifact(spec.key)
+    if art.schema_name != spec.schema_name:
+        raise SchemaMismatch(
+            f"artifact {spec.key!r}: expected schema {spec.schema_name!r}, "
+            f"got {art.schema_name!r}"
+        )
+    if art.version < spec.version:
+        raise SchemaTooOld(
+            f"artifact {spec.key!r}: consumer requires version >= {spec.version}, "
+            f"got {art.version}"
+        )
+    return art.payload
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 langchain
 langchain-openai
 langchain_community
+langchain_ollama
 crewai
 crewai-tools
 
