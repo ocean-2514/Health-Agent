@@ -11,11 +11,14 @@ follow-up questions like ``"那它的 RUL 是多少?"`` work without re-running
 the diagnosis.
 
 Commands:
-  /new      start a fresh session
-  /id       print the current session id
-  /history  dump the current session history
-  /skills   list registered skills
-  /quit     exit
+  /new                 start a fresh session
+  /id                  print the current session id
+  /list                list recent sessions (newest first)
+  /switch <id>         switch to an existing session
+  /delete <id>         delete a session (if it's the current one, auto-creates a new one)
+  /history             dump the current session history
+  /skills              list registered skills
+  /quit                exit
 """
 from __future__ import annotations
 
@@ -27,22 +30,25 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from Python.Src.Supervisor.core import Supervisor
+from Python.Src.Supervisor.loader import load_skills
 from Python.Src.Supervisor.session import default_store
-from Python.Src.Supervisor.skills.transformer_diagnosis import SKILL as DIAGNOSIS_SKILL
 
 
 def _build_default_supervisor() -> Supervisor:
-    """Construct the supervisor with the currently bundled Skills.
+    """Construct the supervisor with whatever is declared in ``Config/skills.yaml``.
 
-    Phase 6 MVP ships just ``transformer_diagnosis``. Future Phase 6.x
-    additions (knowledge_qa, history_lookup, remote A2A skills) get plugged
-    in here.
+    New skills (knowledge_qa, remote A2A skills, ...) are added by editing
+    the YAML — no code change here.
     """
-    return Supervisor(skills=[DIAGNOSIS_SKILL])
+    skills = load_skills()
+    return Supervisor(skills=skills)
 
 
 def _print_help() -> None:
-    print("commands: /new  /id  /history  /skills  /quit")
+    print(
+        "commands: /new  /list  /switch <id>  /delete <id>  "
+        "/id  /history  /skills  /quit"
+    )
 
 
 def main() -> int:
@@ -77,6 +83,46 @@ def main() -> int:
             continue
         if user_input == "/id":
             print(session_id)
+            continue
+        if user_input == "/list":
+            rows = default_store.list_sessions(limit=20)
+            if not rows:
+                print("(无会话)")
+            for s in rows:
+                mark = " *" if s["session_id"] == session_id else "  "
+                print(
+                    f"{mark} {s['session_id']}  last_active={s['last_active']}  "
+                    f"msgs={s['message_count']}"
+                )
+            continue
+        if user_input.startswith("/switch"):
+            parts = user_input.split(None, 1)
+            target = parts[1].strip() if len(parts) == 2 else ""
+            if not target:
+                print("用法: /switch <session_id>")
+            elif target == session_id:
+                print(f"已在会话 {target}")
+            elif not default_store.session_exists(target):
+                print(f"未找到会话 {target} (用 /list 查可用 id)")
+            else:
+                session_id = target
+                print(f"切到会话: {session_id}")
+            continue
+        if user_input.startswith("/delete"):
+            parts = user_input.split(None, 1)
+            target = parts[1].strip() if len(parts) == 2 else ""
+            if not target:
+                print("用法: /delete <session_id>")
+                continue
+            if not default_store.session_exists(target):
+                print(f"未找到会话 {target}")
+                continue
+            default_store.delete_session(target)
+            if target == session_id:
+                session_id = supervisor.new_session()
+                print(f"已删除当前会话 {target}, 自动切到新会话: {session_id}")
+            else:
+                print(f"已删除会话: {target}")
             continue
         if user_input == "/history":
             for row in default_store.get_history(session_id):

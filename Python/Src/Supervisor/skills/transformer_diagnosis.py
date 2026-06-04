@@ -24,6 +24,7 @@ if project_root not in sys.path:
 
 from Python.Src.Agents.graph import run_diagnosis
 from Python.Src.Agents.loader import build_platform_registry
+from Python.Src.Supervisor.session import SessionStore, default_store
 from Python.Src.Supervisor.skill import SkillCard
 
 
@@ -88,11 +89,12 @@ class TransformerDiagnosisSkill:
         output_model=TransformerDiagnosisOutput,
     )
 
-    def __init__(self) -> None:
+    def __init__(self, session_store: SessionStore = default_store) -> None:
         # Build the platform registry once at construction time; the inner
         # graph is recompiled per request (cheap), but plugin discovery and
         # registry validation should not repeat.
         self._registry = build_platform_registry()
+        self._store = session_store
 
     def run(self, **kwargs: Any) -> TransformerDiagnosisOutput:
         inp = TransformerDiagnosisInput(**kwargs)
@@ -119,7 +121,7 @@ class TransformerDiagnosisSkill:
         fusion_final = state.fusion_result.final_fusion_result if state.fusion_result else None
         dga = state.dga_analysis
 
-        return TransformerDiagnosisOutput(
+        out = TransformerDiagnosisOutput(
             health_index=float(rul.health_index) if rul else 0.0,
             predicted_rul_years=float(rul.predicted_rul_years) if rul else 0.0,
             fusion_verdict_cn=fusion_final.final_result_cn if fusion_final else "未知",
@@ -131,6 +133,23 @@ class TransformerDiagnosisSkill:
             extra_artifacts=extra,
         )
 
+        # Persist a structured record so history_lookup can find this run
+        # later (possibly from a different chat session).
+        try:
+            self._store.save_diagnosis_record(
+                equipment_id=inp.equipment_id,
+                substation=inp.substation,
+                health_index=out.health_index,
+                predicted_rul_years=out.predicted_rul_years,
+                fusion_verdict_cn=out.fusion_verdict_cn,
+                fusion_confidence=out.fusion_confidence,
+                dga_risk_score=out.dga_risk_score,
+                primary_threat=out.primary_threat,
+                forced_override=out.forced_override,
+                extras={"artifact_keys": list((state.artifacts or {}).keys())},
+            )
+        except Exception:
+            # Persistence failure should not break the user-facing answer.
+            pass
 
-# Module-level singleton the supervisor / loader picks up.
-SKILL = TransformerDiagnosisSkill()
+        return out

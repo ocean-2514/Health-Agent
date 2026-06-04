@@ -1,0 +1,22 @@
+# Skills the SupervisorAgent dispatches to. Order is informational —
+# the LLM picks which to call based on each skill's `description` field.
+# Set `enabled: false` to suppress without deleting.
+#
+# Adding a new skill = drop a class with `card` + `run`, then add an entry
+# here. No code change in supervisor / chat_cli.
+
+skills:
+  - name: transformer_diagnosis
+    class_path: Python.Src.Supervisor.skills.transformer_diagnosis.TransformerDiagnosisSkill
+    enabled: true
+    init_kwargs: {}
+
+  - name: history_lookup
+    class_path: Python.Src.Supervisor.skills.history_lookup.HistoryLookupSkill
+    enabled: true
+    init_kwargs: {}
+
+  # - name: knowledge_qa
+  #   class_path: Python.Src.Supervisor.skills.knowledge_qa.KnowledgeQASkill
+  #   enabled: false
+  #   init_kwargs: {}

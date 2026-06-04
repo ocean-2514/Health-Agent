@@ -18,7 +18,12 @@ Public entry:
   * ``SessionStore`` — SQLite-backed chat history
 """
 from Python.Src.Supervisor.core import Supervisor
+from Python.Src.Supervisor.loader import SkillLoadError, load_skills
 from Python.Src.Supervisor.session import SessionStore
 from Python.Src.Supervisor.skill import Skill, SkillCard, skill_to_tool
 
-__all__ = ["Supervisor", "SessionStore", "Skill", "SkillCard", "skill_to_tool"]
+__all__ = [
+    "Supervisor", "SessionStore",
+    "Skill", "SkillCard", "skill_to_tool",
+    "load_skills", "SkillLoadError",
+]
