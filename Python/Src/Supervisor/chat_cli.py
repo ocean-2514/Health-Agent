@@ -151,6 +151,20 @@ def main() -> int:
                 display.append(f"{name} [disabled]" if name in disabled else name)
             print(display if display else "(无)")
             continue
+        if user_input.startswith("/register_remote"):
+            rest = _arg(user_input)
+            if not rest:
+                print("用法: /register_remote <url> [name]")
+                continue
+            tokens = rest.split(None, 1)
+            url = tokens[0]
+            override_name = tokens[1].strip() if len(tokens) == 2 else None
+            try:
+                name = supervisor.register_remote_skill(url, name=override_name)
+                print(f"已注册远程: {name}  ({url})")
+            except Exception as e:  # noqa: BLE001
+                print(f"[error] {e}")
+            continue
         if user_input.startswith("/register"):
             class_path = _arg(user_input)
             if not class_path:
@@ -197,20 +211,6 @@ def main() -> int:
                 added = supervisor.register_skills_from_path(path)
                 print(f"新增 {len(added)} 个 skill: {added}" if added
                       else "未发现可加载 skill (需要模块级 SKILL = ... 或 SKILLS = [...])")
-            except Exception as e:  # noqa: BLE001
-                print(f"[error] {e}")
-            continue
-        if user_input.startswith("/register_remote"):
-            rest = _arg(user_input)
-            if not rest:
-                print("用法: /register_remote <url> [name]")
-                continue
-            tokens = rest.split(None, 1)
-            url = tokens[0]
-            override_name = tokens[1].strip() if len(tokens) == 2 else None
-            try:
-                name = supervisor.register_remote_skill(url, name=override_name)
-                print(f"已注册远程: {name}  ({url})")
             except Exception as e:  # noqa: BLE001
                 print(f"[error] {e}")
             continue

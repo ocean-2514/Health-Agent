@@ -113,3 +113,17 @@ class A2AClient:
             raise
         except Exception as e:
             raise A2AClientError(f"send_text({base_url}) failed: {e}") from e
+
+if __name__ == "__main__":
+    client = A2AClient()
+    url = "http://localhost:9001"
+    print(f"Discovering card at {url}...")
+    try:
+        card = client.discover_card(url)
+        # print("Card discovered:")
+        # print(json.dumps(card, indent=2))
+        print(client.send_text(url, "Hello, agent!"))
+        print("Message sent successfully.")
+    except A2AClientError as e:
+        print(f"Error: {e}")
+        exit(1)
