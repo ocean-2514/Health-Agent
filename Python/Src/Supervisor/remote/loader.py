@@ -1,13 +1,13 @@
-"""YAML-driven loader for remote A2A skills.
+"""YAML-driven loader for remote A2A tools.
 
-Reads ``Config/remote_skills.yaml``, builds one ``RemoteA2ASkill`` per
+Reads ``Config/remote_tools.yaml``, builds one ``RemoteA2ATool`` per
 enabled entry, and returns the list. Companion to
-``Python.Src.Supervisor.loader`` (which loads local skills); the upper
-``load_skills`` function in that module concatenates the two.
+``Python.Src.Supervisor.loader`` (which loads local tools); the upper
+``load_tools`` function in that module concatenates the two.
 
 **Relaxed probe**: at load time we try to fetch each remote's agent card
 to enrich the local ``description`` (which is what the LLM reads to decide
-when to call). If discovery fails we **still register the skill** with
+when to call). If discovery fails we **still register the tool** with
 the description supplied in YAML — remote services often start later
 than this process, and failing-loud here would block the whole CLI just
 because one remote isn't up yet. Failures emit a warning instead. The
@@ -16,7 +16,7 @@ sees and can report or retry.
 
 YAML shape::
 
-    remote_skills:
+    remote_tools:
       - name: defect_kb_search
         description: "Look up defect knowledge entries by symptom."
         url: http://localhost:9001
@@ -38,11 +38,11 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from Python.Src.Supervisor.remote.a2a_client import A2AClient, A2AClientError
-from Python.Src.Supervisor.remote.remote_skill import RemoteA2ASkill
+from Python.Src.Supervisor.remote.remote_tool import RemoteA2ATool
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_REMOTE_SKILLS_YAML = Path(project_root) / "Config" / "remote_skills.yaml"
+DEFAULT_REMOTE_TOOLS_YAML = Path(project_root) / "Config" / "remote_tools.yaml"
 
 
 def _enrich_description(
@@ -66,30 +66,30 @@ def _enrich_description(
     return f"{chosen} [remote A2A agent: {remote_name} @ {url}]"
 
 
-def load_remote_skills(
+def load_remote_tools(
     yaml_path: Optional[Path] = None,
     client: Optional[A2AClient] = None,
-) -> List[RemoteA2ASkill]:
-    """Load every enabled remote skill from YAML. Missing file → empty list.
+) -> List[RemoteA2ATool]:
+    """Load every enabled remote tool from YAML. Missing file → empty list.
 
     A missing file is *not* an error — remote agents are optional in this
-    deployment. The local skills loader is separately required to declare
-    at least one skill.
+    deployment. The local tools loader is separately required to declare
+    at least one tool.
     """
-    path = Path(yaml_path or DEFAULT_REMOTE_SKILLS_YAML)
+    path = Path(yaml_path or DEFAULT_REMOTE_TOOLS_YAML)
     if not path.exists():
-        logger.info("no remote skills config at %s, skipping", path)
+        logger.info("no remote tools config at %s, skipping", path)
         return []
 
     with path.open("r", encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
 
-    entries: List[Dict[str, Any]] = config.get("remote_skills") or []
+    entries: List[Dict[str, Any]] = config.get("remote_tools") or []
     if not entries:
         return []
 
     shared_client = client or A2AClient()
-    skills: List[RemoteA2ASkill] = []
+    tools: List[RemoteA2ATool] = []
     for entry in entries:
         if not entry.get("enabled", True):
             continue
@@ -97,7 +97,7 @@ def load_remote_skills(
         url = entry.get("url")
         description = entry.get("description", "")
         if not (name and url and description):
-            logger.warning("remote_skills entry missing name/url/description: %r", entry)
+            logger.warning("remote_tools entry missing name/url/description: %r", entry)
             continue
         timeout_s = float(entry.get("timeout_s", 30.0))
         probe = bool(entry.get("probe", True))
@@ -107,8 +107,8 @@ def load_remote_skills(
                 shared_client, description, url, timeout_s
             )
 
-        skills.append(
-            RemoteA2ASkill(
+        tools.append(
+            RemoteA2ATool(
                 name=name,
                 description=description,
                 url=url,
@@ -116,4 +116,4 @@ def load_remote_skills(
                 client=shared_client,
             )
         )
-    return skills
+    return tools

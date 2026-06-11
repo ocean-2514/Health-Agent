@@ -1,8 +1,8 @@
-"""Trivial echo skill — exercises the SKILL convention used by
-``discover_skills_from_path``.
+"""Trivial echo tool — exercises the TOOL convention used by
+``discover_tools_from_path``.
 
 Drop more files like this next to it; the loader picks any that export
-``SKILL`` or ``SKILLS`` at module level.
+``TOOL`` or ``TOOLS`` at module level.
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from Python.Src.Supervisor.skill import SkillCard
+from Python.Src.Supervisor.tool import ToolCard
 
 
 class EchoIn(BaseModel):
@@ -21,8 +21,8 @@ class EchoOut(BaseModel):
     echoed: str
 
 
-class EchoSkill:
-    card = SkillCard(
+class EchoTool:
+    card = ToolCard(
         name="echo",
         description="Returns whatever text you pass in. Useful only for testing.",
         input_model=EchoIn,
@@ -33,4 +33,4 @@ class EchoSkill:
         return EchoOut(echoed=EchoIn(**kwargs).text)
 
 
-SKILL = EchoSkill()
+TOOL = EchoTool()

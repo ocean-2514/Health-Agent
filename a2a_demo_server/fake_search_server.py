@@ -9,7 +9,7 @@ It exposes:
   * ``POST /``                            — A2A JSON-RPC endpoint
 
 The executor accepts any text input and replies with a canned defect
-knowledge list. Purpose: give Phase 7's RemoteA2ASkill a real remote
+knowledge list. Purpose: give the Supervisor's RemoteA2ATool a real remote
 process to talk to (HTTP round-trip, real protobuf, real card discovery)
 so smoke tests aren't quietly mocked away.
 """

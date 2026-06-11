@@ -4,28 +4,41 @@ Run::
 
     python Python/Src/Supervisor/chat_cli.py
 
-Type a message; the supervisor decides whether to call a Skill (e.g.
+Type a message; the supervisor decides whether to call a Tool (e.g.
 ``transformer_diagnosis``) or just answer directly. Multi-turn — chat
 history is persisted to SQLite (``var/sessions.db`` by default) so
 follow-up questions like ``"那它的 RUL 是多少?"`` work without re-running
 the diagnosis.
 
+Three layers are visible here:
+  * **Tools**  — callable units the LLM invokes (``/tools`` to list).
+  * **Skills** — loadable domain knowledge / SKILL.md (``/skills`` to list,
+    ``/load_skill <name>`` to preview a body).
+  * **Agents** — remote A2A agents, surfaced as Tools (``/register_remote``).
+
 Commands:
-  /new                  start a fresh session
-  /id                   print the current session id
-  /list                 list recent sessions (newest first)
-  /switch <id>          switch to an existing session
-  /delete <id>          delete a session (if it's the current one, auto-creates a new one)
-  /history              dump the current session history
-  /skills               list registered skills (disabled shown as 'name [disabled]')
-  /register <class_path>  hot-register a Skill class (no-arg constructor)
-  /unregister <name>    remove a skill
-  /enable <name>        re-enable a previously disabled skill
-  /disable <name>       hide a skill from the LLM without removing it
-  /load_dir <path>      scan a directory for files exporting SKILL/SKILLS
-  /register_remote <url> [name]   hot-register a remote A2A agent; probes card if name omitted
-  /load_remote_yaml [path]        load remote skills from YAML (default Config/remote_skills.yaml)
-  /quit                 exit
+  session:
+    /new                  start a fresh session
+    /id                   print the current session id
+    /list                 list recent sessions (newest first)
+    /switch <id>          switch to an existing session
+    /delete <id>          delete a session (current → auto new)
+    /history              dump the current session history
+  tools:
+    /tools                list registered tools (disabled shown as 'name [disabled]')
+    /register <class_path>  hot-register a Tool class (no-arg constructor)
+    /unregister <name>    remove a tool
+    /enable <name>        re-enable a previously disabled tool
+    /disable <name>       hide a tool from the LLM without removing it
+    /load_dir <path>      scan a directory for files exporting TOOL/TOOLS
+    /register_remote <url> [name]   hot-register a remote A2A agent (probes card)
+    /load_remote_yaml [path]        load remote tools from YAML
+  skills (prompt-style knowledge):
+    /skills               list available SKILL.md skills
+    /load_skill <name>    preview a skill's body
+    /reload_skills        re-scan skill directories
+  other:
+    /quit                 exit
 """
 from __future__ import annotations
 
@@ -37,26 +50,29 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from Python.Src.Supervisor.core import Supervisor
-from Python.Src.Supervisor.loader import load_skills
+from Python.Src.Supervisor.loader import load_tools
 from Python.Src.Supervisor.session import default_store
 
 
 def _build_default_supervisor() -> Supervisor:
-    """Construct the supervisor with whatever is declared in ``Config/skills.yaml``.
+    """Construct the supervisor with whatever is declared in ``Config/tools.yaml``
+    (plus remote tools from ``Config/remote_tools.yaml`` and prompt-style
+    skills discovered under ``skills/``).
 
-    New skills (knowledge_qa, remote A2A skills, ...) are added by editing
-    the YAML — no code change here.
+    New tools/skills are added by editing the YAML / dropping a SKILL.md —
+    no code change here.
     """
-    skills = load_skills()
-    return Supervisor(skills=skills)
+    tools = load_tools()
+    return Supervisor(tools=tools)
 
 
 def _print_help() -> None:
     print(
         "session: /new  /list  /switch <id>  /delete <id>  /id  /history\n"
-        "skills:  /skills  /register <class_path>  /unregister <name>  "
+        "tools:   /tools  /register <class_path>  /unregister <name>  "
         "/enable <name>  /disable <name>  /load_dir <path>\n"
         "remote:  /register_remote <url> [name]  /load_remote_yaml [path]\n"
+        "skills:  /skills  /load_skill <name>  /reload_skills\n"
         "other:   /quit"
     )
 
@@ -73,12 +89,13 @@ def main() -> int:
     except Exception:
         pass
 
-    print("=== HealthAgent Supervisor (Phase 6 MVP) ===")
+    print("=== HealthAgent Supervisor ===")
     print("正在初始化 supervisor (加载平台 registry + 编译诊断图)...")
     supervisor = _build_default_supervisor()
     session_id = supervisor.new_session()
     print(f"已创建会话: {session_id}")
-    print(f"已注册技能: {supervisor.skill_names}")
+    print(f"已注册工具: {supervisor.tool_names}")
+    print(f"可用知识技能: {supervisor.skill_names}")
     _print_help()
 
     while True:
@@ -111,8 +128,7 @@ def main() -> int:
                 )
             continue
         if user_input.startswith("/switch"):
-            parts = user_input.split(None, 1)
-            target = parts[1].strip() if len(parts) == 2 else ""
+            target = _arg(user_input)
             if not target:
                 print("用法: /switch <session_id>")
             elif target == session_id:
@@ -124,8 +140,7 @@ def main() -> int:
                 print(f"切到会话: {session_id}")
             continue
         if user_input.startswith("/delete"):
-            parts = user_input.split(None, 1)
-            target = parts[1].strip() if len(parts) == 2 else ""
+            target = _arg(user_input)
             if not target:
                 print("用法: /delete <session_id>")
                 continue
@@ -143,11 +158,12 @@ def main() -> int:
             for row in default_store.get_history(session_id):
                 print(f"  [{row['role']:>9}] {row['content']}")
             continue
-        if user_input == "/skills":
-            active = supervisor.skill_names
-            disabled = set(supervisor.disabled_skill_names)
+
+        # ----------------------------------------------------------- tools
+        if user_input == "/tools":
+            disabled = set(supervisor.disabled_tool_names)
             display = []
-            for name in supervisor.all_skill_names:
+            for name in supervisor.all_tool_names:
                 display.append(f"{name} [disabled]" if name in disabled else name)
             print(display if display else "(无)")
             continue
@@ -160,7 +176,7 @@ def main() -> int:
             url = tokens[0]
             override_name = tokens[1].strip() if len(tokens) == 2 else None
             try:
-                name = supervisor.register_remote_skill(url, name=override_name)
+                name = supervisor.register_remote_tool(url, name=override_name)
                 print(f"已注册远程: {name}  ({url})")
             except Exception as e:  # noqa: BLE001
                 print(f"[error] {e}")
@@ -171,7 +187,7 @@ def main() -> int:
                 print("用法: /register <class_path>")
                 continue
             try:
-                name = supervisor.register_skill_from_config(
+                name = supervisor.register_tool_from_config(
                     {"class_path": class_path, "enabled": True}
                 )
                 print(f"已注册: {name}")
@@ -183,7 +199,7 @@ def main() -> int:
             if not name:
                 print("用法: /unregister <name>")
                 continue
-            print(f"已移除: {name}" if supervisor.unregister_skill(name)
+            print(f"已移除: {name}" if supervisor.unregister_tool(name)
                   else f"未找到: {name}")
             continue
         if user_input.startswith("/enable"):
@@ -191,7 +207,7 @@ def main() -> int:
             if not name:
                 print("用法: /enable <name>")
                 continue
-            print(f"已启用: {name}" if supervisor.enable_skill(name)
+            print(f"已启用: {name}" if supervisor.enable_tool(name)
                   else f"未变化 (不存在或已启用): {name}")
             continue
         if user_input.startswith("/disable"):
@@ -199,7 +215,7 @@ def main() -> int:
             if not name:
                 print("用法: /disable <name>")
                 continue
-            print(f"已禁用: {name}" if supervisor.disable_skill(name)
+            print(f"已禁用: {name}" if supervisor.disable_tool(name)
                   else f"未变化 (不存在或已禁用): {name}")
             continue
         if user_input.startswith("/load_dir"):
@@ -208,21 +224,47 @@ def main() -> int:
                 print("用法: /load_dir <path>")
                 continue
             try:
-                added = supervisor.register_skills_from_path(path)
-                print(f"新增 {len(added)} 个 skill: {added}" if added
-                      else "未发现可加载 skill (需要模块级 SKILL = ... 或 SKILLS = [...])")
+                added = supervisor.register_tools_from_path(path)
+                print(f"新增 {len(added)} 个 tool: {added}" if added
+                      else "未发现可加载 tool (需要模块级 TOOL = ... 或 TOOLS = [...])")
             except Exception as e:  # noqa: BLE001
                 print(f"[error] {e}")
             continue
         if user_input.startswith("/load_remote_yaml"):
             path = _arg(user_input) or None
             try:
-                added = supervisor.register_remote_skills_from_yaml(path)
-                print(f"新增 {len(added)} 个远程 skill: {added}" if added
+                added = supervisor.register_remote_tools_from_yaml(path)
+                print(f"新增 {len(added)} 个远程 tool: {added}" if added
                       else "未新增 (文件不存在 / 全部已注册 / 没有 enabled 项)")
             except Exception as e:  # noqa: BLE001
                 print(f"[error] {e}")
             continue
+
+        # ----------------------------------------------------------- skills
+        if user_input == "/skills":
+            reg = supervisor._skill_registry  # noqa: SLF001 — CLI introspection
+            skills = reg.list()
+            if not skills:
+                print("(无知识技能; 在 skills/<name>/SKILL.md 添加)")
+            for s in skills:
+                print(f"  {s.name} — {s.description}")
+            continue
+        if user_input.startswith("/load_skill"):
+            name = _arg(user_input)
+            if not name:
+                print("用法: /load_skill <name>")
+                continue
+            skill = supervisor._skill_registry.get(name)  # noqa: SLF001
+            if skill is None:
+                print(f"未找到技能 {name} (用 /skills 查)")
+            else:
+                print(f"--- {skill.name} ---\n{skill.body}")
+            continue
+        if user_input == "/reload_skills":
+            names = supervisor.reload_skills()
+            print(f"已重载知识技能: {names}")
+            continue
+
         if user_input.startswith("/"):
             _print_help()
             continue

@@ -11,7 +11,7 @@ methods:
     the concatenated text of all reply parts.
 
 Failure modes are normalised to a single ``A2AClientError`` so callers
-(``RemoteA2ASkill.run``) can map them to a Skill-level error message
+(``RemoteA2ATool.run``) can map them to a Tool-level error message
 instead of leaking transport details to the LLM.
 """
 from __future__ import annotations

@@ -1,26 +1,36 @@
 """Supervisor — the outer-layer LLM tool-calling orchestrator.
 
-Builds a LangGraph ReAct-style agent over a set of registered ``Skill``s.
+Builds a LangGraph ReAct-style agent over a set of registered ``Tool``s.
 On each ``chat()`` turn it loads the session history from
-:class:`SessionStore`, runs the agent (which may invoke 0+ skills in
+:class:`SessionStore`, runs the agent (which may invoke 0+ tools in
 sequence as the LLM decides), persists the new exchange, and returns the
 LLM's final answer.
+
+Three cleanly separated concepts meet here (see ``tool.py`` / ``skill.py``):
+
+  * **Tool**  — the only thing the LLM calls directly (function-calling).
+    A Tool may wrap a primitive, a deterministic Workflow (the Phase 3-5
+    diagnosis graph), or a remote Agent (A2A).
+  * **Skill** — loadable prompt / domain knowledge (``SKILL.md``). Surfaced
+    to the LLM as a one-line catalogue in the system prompt; the body is
+    pulled in on demand via the built-in ``load_skill`` Tool.
+  * **Agent** — an autonomous / remote delegate, reached *through* a Tool
+    (e.g. ``RemoteA2ATool``), never called by the LLM directly.
 
 LangChain 1.x reorganised its agent API; the simplest portable choice is
 ``langgraph.prebuilt.create_react_agent``, which compiles a tool-calling
 loop into a LangGraph StateGraph. The supervisor itself contains no domain
-logic — every action is either a direct LLM response or a tool call into
-one of the Skills.
+logic.
 
-Dynamic skill registry (mirrors the pattern from the earlier
-``D:/code/AI/project/agent`` SupervisorAgent's ``register_expert``):
-``register_skill`` / ``unregister_skill`` / ``enable_skill`` /
-``disable_skill`` / ``register_skill_from_config`` /
-``register_skills_from_path`` all mutate the registry and recompile the
-underlying agent. There is no public LangGraph API to splice tools into
-a compiled graph, so each mutation triggers a rebuild — cheap relative
-to one LLM call, but batch mutations via ``register_skills`` to avoid
-N rebuilds.
+Dynamic Tool registry (mirrors the earlier ``D:/code/AI/project/agent``
+SupervisorAgent's ``register_expert``): ``register_tool`` /
+``unregister_tool`` / ``enable_tool`` / ``disable_tool`` /
+``register_tool_from_config`` / ``register_tools_from_path`` /
+``register_remote_tool`` / ``register_remote_tools_from_yaml`` all mutate
+the registry and recompile the underlying agent. There is no public
+LangGraph API to splice tools into a compiled graph, so each mutation
+triggers a rebuild — cheap relative to one LLM call, but batch mutations
+via ``register_tools`` to avoid N rebuilds.
 """
 from __future__ import annotations
 
@@ -40,7 +50,8 @@ if project_root not in sys.path:
 
 from Python.Src.Middleware.GlobalConfig import GlobalConfig
 from Python.Src.Supervisor.session import SessionStore, default_store
-from Python.Src.Supervisor.skill import Skill, skill_to_tool
+from Python.Src.Supervisor.skill import LoadSkillTool, SkillRegistry
+from Python.Src.Supervisor.tool import Tool, to_langchain_tool
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +61,8 @@ _SYSTEM_PROMPT = (
     "历史查询等具体任务,也可以直接对用户的概念性 / 闲聊问题作答。\n\n"
     "调用工具的判断原则:\n"
     "  - 用户明确要求'诊断 / 体检 / 评估 / 查 RUL / 查健康指数' → 调 transformer_diagnosis\n"
-    "  - 用户问'某缺陷怎么处理 / 某规程怎么规定' → 调 knowledge_qa(若已注册)\n"
     "  - 用户问'这台设备上次诊断结果 / 历史趋势' → 调 history_lookup(若已注册)\n"
+    "  - 任务匹配某条'可用知识技能' → 先 load_skill 加载其正文, 再据此作答\n"
     "  - 纯概念解释 / 寒暄 / follow-up(上一轮已给出的指标) → 直接作答, 不要重复调用工具\n"
     "  - 一次请求可以同时调多个独立工具, 提高效率\n\n"
     "工具返回结构化结果后, 用自然语言简洁回答用户; 数值类指标请直接引用, "
@@ -60,19 +71,21 @@ _SYSTEM_PROMPT = (
 
 
 class Supervisor:
-    """Multi-turn chat orchestrator over a mutable set of Skills."""
+    """Multi-turn chat orchestrator over a mutable set of Tools + Skills."""
 
     def __init__(
         self,
-        skills: Sequence[Skill],
+        tools: Sequence[Tool],
         *,
         session_store: SessionStore = default_store,
+        skill_registry: Optional[SkillRegistry] = None,
+        skill_dirs: Optional[List[Path]] = None,
         model_name: Optional[str] = None,
         base_url: Optional[str] = None,
         temperature: float = 0.0,
     ) -> None:
-        if not skills:
-            raise ValueError("Supervisor requires at least one Skill")
+        if not tools:
+            raise ValueError("Supervisor requires at least one Tool")
 
         cfg = GlobalConfig.config.get("LLM", {}).get("Local", {})
         self._model_name = model_name or cfg.get("ModelName", "gpt-oss:120b-cloud")
@@ -86,45 +99,49 @@ class Supervisor:
             temperature=self._temperature,
         )
 
-        # ordered registry: insertion order = display order. Disabled
-        # skills stay here so enable/disable is non-destructive.
-        self._skills: "OrderedDict[str, Skill]" = OrderedDict()
+        # Prompt-style Skills (SKILL.md). Surfaced as a catalogue in the
+        # system prompt; bodies loaded on demand via the built-in load_skill.
+        self._skill_registry = skill_registry or SkillRegistry.discover(skill_dirs)
+
+        # ordered Tool registry: insertion order = display order. Disabled
+        # tools stay here so enable/disable is non-destructive.
+        self._tools: "OrderedDict[str, Tool]" = OrderedDict()
         self._disabled: Set[str] = set()
 
-        self.register_skills(skills)  # also performs the initial rebuild
+        self.register_tools(tools)  # also performs the initial rebuild
 
     # =========================================================== dynamic API
 
-    def register_skill(self, skill: Skill) -> str:
-        """Register one skill. If the name already exists it is overwritten
+    def register_tool(self, tool: Tool) -> str:
+        """Register one tool. If the name already exists it is overwritten
         (matching the original ``register_expert`` semantics). Returns the
         registered name."""
-        name = self._add_one(skill)
+        name = self._add_one(tool)
         self._rebuild_agent()
         return name
 
-    def register_skills(self, skills: Iterable[Skill]) -> List[str]:
+    def register_tools(self, tools: Iterable[Tool]) -> List[str]:
         """Batch register; one rebuild at the end (much cheaper than N)."""
         names: List[str] = []
-        for s in skills:
-            names.append(self._add_one(s))
+        for t in tools:
+            names.append(self._add_one(t))
         self._rebuild_agent()
         return names
 
-    def unregister_skill(self, name: str) -> bool:
-        """Remove a skill (also clears any disabled flag). Returns whether
+    def unregister_tool(self, name: str) -> bool:
+        """Remove a tool (also clears any disabled flag). Returns whether
         it was present."""
-        present = name in self._skills
-        self._skills.pop(name, None)
+        present = name in self._tools
+        self._tools.pop(name, None)
         self._disabled.discard(name)
         if present:
             self._rebuild_agent()
         return present
 
-    def disable_skill(self, name: str) -> bool:
-        """Soft-disable: skill stays in the registry but is hidden from the
+    def disable_tool(self, name: str) -> bool:
+        """Soft-disable: tool stays in the registry but is hidden from the
         LLM until re-enabled. Returns whether anything changed."""
-        if name not in self._skills:
+        if name not in self._tools:
             return False
         if name in self._disabled:
             return False
@@ -132,8 +149,8 @@ class Supervisor:
         self._rebuild_agent()
         return True
 
-    def enable_skill(self, name: str) -> bool:
-        if name not in self._skills:
+    def enable_tool(self, name: str) -> bool:
+        if name not in self._tools:
             return False
         if name not in self._disabled:
             return False
@@ -141,32 +158,54 @@ class Supervisor:
         self._rebuild_agent()
         return True
 
-    def register_skill_from_config(self, spec: Dict[str, Any]) -> str:
-        """Instantiate one skill from a spec dict (same shape as a YAML
+    def register_tool_from_config(self, spec: Dict[str, Any]) -> str:
+        """Instantiate one tool from a spec dict (same shape as a YAML
         entry) and register it. ``spec['class_path']`` and optional
         ``init_kwargs`` are required; ``enabled: false`` is honoured."""
-        # Local import: keeps the loader module's heavier dependencies
-        # (yaml, importlib chains) off the common path.
-        from Python.Src.Supervisor.loader import _import_class, SkillLoadError
+        from Python.Src.Supervisor.loader import _import_class, ToolLoadError
 
         if not spec.get("enabled", True):
-            raise SkillLoadError(f"refusing to register disabled spec: {spec}")
+            raise ToolLoadError(f"refusing to register disabled spec: {spec}")
         class_path = spec.get("class_path")
         if not class_path:
-            raise SkillLoadError(f"register spec missing class_path: {spec}")
+            raise ToolLoadError(f"register spec missing class_path: {spec}")
         cls = _import_class(class_path)
         init_kwargs: Dict[str, Any] = spec.get("init_kwargs") or {}
         try:
-            skill = cls(**init_kwargs)
+            tool = cls(**init_kwargs)
         except Exception as e:
-            raise SkillLoadError(f"failed to instantiate {class_path}: {e}") from e
-        if not (hasattr(skill, "card") and hasattr(skill, "run")):
-            raise SkillLoadError(
-                f"{class_path} does not satisfy Skill protocol (need card + run)"
+            raise ToolLoadError(f"failed to instantiate {class_path}: {e}") from e
+        if not (hasattr(tool, "card") and hasattr(tool, "run")):
+            raise ToolLoadError(
+                f"{class_path} does not satisfy Tool protocol (need card + run)"
             )
-        return self.register_skill(skill)
+        return self.register_tool(tool)
 
-    def register_remote_skill(
+    def register_tools_from_path(
+        self, directory: str | Path, recursive: bool = True
+    ) -> List[str]:
+        """Scan ``directory`` for Python modules that declare ``TOOL = ...``
+        or ``TOOLS = [...]`` at module level, and register each. Returns the
+        names of newly-registered tools (skipping anything whose name was
+        already present)."""
+        from Python.Src.Supervisor.discovery import discover_tools_from_path
+
+        discovered = discover_tools_from_path(directory, recursive=recursive)
+        new: List[Tool] = []
+        for t in discovered:
+            name = getattr(t.card, "name", None)
+            if not name:
+                logger.warning("discovered object has no .card.name, skipping: %r", t)
+                continue
+            if name in self._tools:
+                logger.info("tool %r already registered, leaving existing", name)
+                continue
+            new.append(t)
+        if not new:
+            return []
+        return self.register_tools(new)
+
+    def register_remote_tool(
         self,
         url: str,
         *,
@@ -174,20 +213,18 @@ class Supervisor:
         description: Optional[str] = None,
         timeout_s: float = 30.0,
     ) -> str:
-        """Hot-register a remote A2A agent by URL.
+        """Hot-register a remote A2A agent by URL (wrapped as a Tool).
 
         If ``name`` or ``description`` is missing, probe the remote's
         agent card and use its ``name`` / ``description``. Probe failure
         falls back to a synthesised description (matches the relaxed
-        startup behaviour in ``load_remote_skills``) so a temporarily-down
+        startup behaviour in ``load_remote_tools``) so a temporarily-down
         remote can still be registered for later use.
         """
-        # Local import: keeps a2a-sdk / httpx off the hot path for callers
-        # that never touch remotes.
         from Python.Src.Supervisor.remote import (
             A2AClient,
             A2AClientError,
-            RemoteA2ASkill,
+            RemoteA2ATool,
         )
 
         probed_name: Optional[str] = None
@@ -201,7 +238,7 @@ class Supervisor:
                 probed_desc = card.get("description")
             except A2AClientError as e:
                 logger.warning(
-                    "register_remote_skill probe failed for %s: %s "
+                    "register_remote_tool probe failed for %s: %s "
                     "— registering with caller/fallback values",
                     url, e,
                 )
@@ -209,7 +246,7 @@ class Supervisor:
         final_name = name or probed_name
         if not final_name:
             raise ValueError(
-                f"could not determine skill name for {url}: pass name= "
+                f"could not determine tool name for {url}: pass name= "
                 f"or make sure the remote serves an agent-card with 'name'"
             )
         final_desc = (
@@ -222,8 +259,8 @@ class Supervisor:
         else:
             final_desc = f"{final_desc} [remote: {url}, unreachable at registration]"
 
-        return self.register_skill(
-            RemoteA2ASkill(
+        return self.register_tool(
+            RemoteA2ATool(
                 name=final_name,
                 description=final_desc,
                 url=url,
@@ -231,47 +268,29 @@ class Supervisor:
             )
         )
 
-    def register_remote_skills_from_yaml(
+    def register_remote_tools_from_yaml(
         self, yaml_path: Optional[str | Path] = None
     ) -> List[str]:
-        """Load every enabled entry from a ``remote_skills.yaml`` file
-        (default: ``Config/remote_skills.yaml``) and register them. Reuses
+        """Load every enabled entry from a ``remote_tools.yaml`` file
+        (default: ``Config/remote_tools.yaml``) and register them. Reuses
         the same loader + relaxed-probe behaviour as startup loading."""
-        from Python.Src.Supervisor.remote import load_remote_skills
+        from Python.Src.Supervisor.remote import load_remote_tools
 
         path = Path(yaml_path) if yaml_path else None
-        new = load_remote_skills(yaml_path=path)
-        # Skip duplicates (same name already registered) — matches the
-        # behaviour of register_skills_from_path so re-running is safe.
-        fresh = [s for s in new if s.card.name not in self._skills]
+        new = load_remote_tools(yaml_path=path)
+        fresh = [t for t in new if t.card.name not in self._tools]
         if not fresh:
             return []
-        return self.register_skills(fresh)
+        return self.register_tools(fresh)
 
-    def register_skills_from_path(
-        self, directory: str | Path, recursive: bool = True
-    ) -> List[str]:
-        """Scan ``directory`` for Python modules that declare
-        ``SKILL = ...`` or ``SKILLS = [...]`` at module level, instantiate
-        nothing (the module already did), and register each. Returns the
-        names of newly-registered skills (skipping anything whose name
-        was already present)."""
-        from Python.Src.Supervisor.discovery import discover_skills_from_path
+    # ============================================================ skill API
 
-        discovered = discover_skills_from_path(directory, recursive=recursive)
-        new: List[Skill] = []
-        for s in discovered:
-            name = getattr(s.card, "name", None)
-            if not name:
-                logger.warning("discovered object has no .card.name, skipping: %r", s)
-                continue
-            if name in self._skills:
-                logger.info("skill %r already registered, leaving existing", name)
-                continue
-            new.append(s)
-        if not new:
-            return []
-        return self.register_skills(new)
+    def reload_skills(self, skill_dirs: Optional[List[Path]] = None) -> List[str]:
+        """Re-discover prompt-style Skills from disk and rebuild. Returns the
+        current skill names."""
+        self._skill_registry = SkillRegistry.discover(skill_dirs)
+        self._rebuild_agent()
+        return self._skill_registry.names
 
     # ============================================================ chat path
 
@@ -300,44 +319,63 @@ class Supervisor:
     # =============================================================== views
 
     @property
+    def tool_names(self) -> List[str]:
+        """Tool names exposed to the LLM right now (excludes disabled)."""
+        return [n for n in self._tools if n not in self._disabled]
+
+    @property
+    def all_tool_names(self) -> List[str]:
+        """All registered tool names, including disabled."""
+        return list(self._tools.keys())
+
+    @property
+    def disabled_tool_names(self) -> List[str]:
+        return [n for n in self._tools if n in self._disabled]
+
+    @property
     def skill_names(self) -> List[str]:
-        """Names exposed to the LLM right now (excludes disabled)."""
-        return [n for n in self._skills if n not in self._disabled]
-
-    @property
-    def all_skill_names(self) -> List[str]:
-        """All registered names, including disabled."""
-        return list(self._skills.keys())
-
-    @property
-    def disabled_skill_names(self) -> List[str]:
-        return [n for n in self._skills if n in self._disabled]
+        """Prompt-style Skill names available for load_skill."""
+        return self._skill_registry.names
 
     # ============================================================ internals
 
-    def _add_one(self, skill: Skill) -> str:
-        if not (hasattr(skill, "card") and hasattr(skill, "run")):
+    def _add_one(self, tool: Tool) -> str:
+        if not (hasattr(tool, "card") and hasattr(tool, "run")):
             raise TypeError(
-                f"{skill!r} does not satisfy the Skill protocol (need card + run)"
+                f"{tool!r} does not satisfy the Tool protocol (need card + run)"
             )
-        name = skill.card.name
+        name = tool.card.name
         if not name:
-            raise ValueError(f"skill {skill!r} has empty card.name")
-        if name in self._skills:
-            logger.info("re-registering skill %r (overwrite)", name)
-        self._skills[name] = skill
+            raise ValueError(f"tool {tool!r} has empty card.name")
+        if name in self._tools:
+            logger.info("re-registering tool %r (overwrite)", name)
+        self._tools[name] = tool
         self._disabled.discard(name)
         return name
 
+    def _build_prompt(self) -> str:
+        """System prompt + the Skill catalogue (progressive disclosure)."""
+        prompt = _SYSTEM_PROMPT
+        catalogue = self._skill_registry.catalogue_text()
+        if catalogue:
+            prompt += (
+                "\n\n## 可用知识技能\n"
+                "(用 load_skill(name) 加载正文后再作答)\n" + catalogue
+            )
+        return prompt
+
     def _rebuild_agent(self) -> None:
         """Recompile the underlying ReAct agent over the currently-active
-        skills. Called by every public mutator."""
-        active = [s for n, s in self._skills.items() if n not in self._disabled]
-        self._tools = [skill_to_tool(s) for s in active]
+        tools (+ the built-in load_skill if any Skill exists). Called by
+        every public mutator."""
+        active = [t for n, t in self._tools.items() if n not in self._disabled]
+        lc_tools = [to_langchain_tool(t) for t in active]
+        if self._skill_registry.list():
+            lc_tools.append(to_langchain_tool(LoadSkillTool(self._skill_registry)))
         self._agent = create_react_agent(
             model=self._llm,
-            tools=self._tools,
-            prompt=_SYSTEM_PROMPT,
+            tools=lc_tools,
+            prompt=self._build_prompt(),
         )
 
     def _load_history(self, session_id: str) -> List[BaseMessage]:
@@ -362,7 +400,6 @@ class Supervisor:
             if not content:
                 continue
             if isinstance(content, list):
-                # Some chat models return content as a list of parts.
                 parts = [p.get("text", "") for p in content if isinstance(p, dict)]
                 joined = "".join(parts).strip()
                 if joined:

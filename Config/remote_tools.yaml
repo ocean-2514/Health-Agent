@@ -1,12 +1,12 @@
-# Remote A2A agents the Supervisor surfaces as skills.
+# Remote A2A agents the Supervisor surfaces as Tools.
 #
-# Each entry is wrapped as a RemoteA2ASkill and shows up alongside local
-# skills (transformer_diagnosis, history_lookup). The LLM decides when to
+# Each entry is wrapped as a RemoteA2ATool and shows up alongside local
+# tools (transformer_diagnosis, history_lookup). The LLM decides when to
 # call based on `description`, so be specific about the remote agent's
-# capability and when to prefer it over a local skill.
+# capability and when to prefer it over a local tool.
 #
 # Probe behaviour (relaxed): if the remote endpoint is unreachable at
-# startup, we log a warning and still register the skill — the call will
+# startup, we log a warning and still register the tool — the call will
 # fail at run time with success=false, which the LLM can report. Set
 # `enabled: false` to suppress without deleting.
 #
@@ -14,7 +14,7 @@
 #     python -m a2a_demo_server.fake_search_server
 # from the repo root) — returns canned defect knowledge.
 
-remote_skills:
+remote_tools:
   - name: defect_kb_search
     description: >-
       Look up transformer defect knowledge entries by symptom keywords

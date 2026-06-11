@@ -1,11 +1,12 @@
-"""History lookup skill — past diagnosis records for one equipment.
+"""History lookup Tool — past diagnosis records for one equipment.
 
-Queries the ``diagnosis_records`` table the :class:`TransformerDiagnosisSkill`
+Queries the ``diagnosis_records`` table the :class:`TransformerDiagnosisTool`
 writes after each successful run. Returns the recent records plus a tiny
 trend summary (HI / RUL deltas vs. the previous run) so the supervisor LLM
 can directly answer "之前诊断过吗 / 上次结果如何 / HI 趋势怎么样".
 
-Cheap, deterministic, no LLM call — pure SQL.
+Cheap, deterministic, no LLM call — pure SQL. A textbook example of a Tool
+that wraps a primitive (vs. transformer_diagnosis, which wraps a Workflow).
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from Python.Src.Supervisor.session import SessionStore, default_store
-from Python.Src.Supervisor.skill import SkillCard
+from Python.Src.Supervisor.tool import ToolCard
 
 
 # ---------------------------------------------------------------------------
@@ -65,13 +66,13 @@ class HistoryLookupOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Skill
+# Tool
 # ---------------------------------------------------------------------------
 
-class HistoryLookupSkill:
+class HistoryLookupTool:
     """Look up persisted diagnosis records for one equipment id."""
 
-    card = SkillCard(
+    card = ToolCard(
         name="history_lookup",
         description=(
             "查询某台变压器过去的诊断记录(健康指数 / 剩余寿命 / 缺陷判定 / "

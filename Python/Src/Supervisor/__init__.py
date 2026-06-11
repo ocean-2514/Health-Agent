@@ -1,39 +1,50 @@
-"""Phase 6 — outer SupervisorAgent layer.
+"""Outer SupervisorAgent layer — three cleanly separated concepts.
 
-Wraps the Phase 3-5 transformer-diagnosis platform as ONE *skill* and puts
-it behind a LangChain tool-calling supervisor that takes natural-language
-requests, decides which skill(s) to invoke (alone or in combination), and
-returns an aggregated answer.
+Wraps the Phase 3-5 transformer-diagnosis platform and puts it behind a
+LangChain tool-calling supervisor that takes natural-language requests,
+decides which capability to use, and returns an aggregated answer.
 
-The inner platform (``Python/Src/Agents/*``) is not touched. From the
-outside it looks like a single skill: ``transformer_diagnosis(equipment_id,
-substation, raw_input)`` -> ``{health_index, predicted_rul_years,
-fusion_verdict_cn, final_report, ...}``. New top-level skills
-(``knowledge_qa``, ``history_lookup``, future remote A2A agents) sit at
-the same level.
+The three concepts (see ``tool.py`` / ``skill.py`` / ``remote/``):
+
+  * **Tool**  — the only thing the LLM calls directly (function-calling).
+    Wraps a primitive, a deterministic Workflow (the inner diagnosis
+    graph), or a remote Agent. Contract: ``ToolCard`` + ``run``.
+  * **Skill** — loadable prompt / domain knowledge (``SKILL.md``), surfaced
+    as a catalogue and pulled in via the built-in ``load_skill`` Tool.
+  * **Agent** — autonomous / remote delegate, reached *through* a Tool
+    (``RemoteA2ATool``), never called by the LLM directly.
 
 Public entry:
-  * ``Supervisor`` — the multi-turn chat orchestrator (see ``core.py``)
-  * ``Skill`` / ``SkillCard`` — the protocol every skill satisfies
+  * ``Supervisor``  — the multi-turn chat orchestrator (see ``core.py``)
+  * ``Tool`` / ``ToolCard`` / ``to_langchain_tool`` — the Tool contract
+  * ``Skill`` / ``SkillRegistry`` / ``LoadSkillTool`` — the prompt-Skill layer
   * ``SessionStore`` — SQLite-backed chat history
 """
 from Python.Src.Supervisor.core import Supervisor
-from Python.Src.Supervisor.discovery import discover_skills_from_path
-from Python.Src.Supervisor.loader import SkillLoadError, load_skills
+from Python.Src.Supervisor.discovery import discover_tools_from_path
+from Python.Src.Supervisor.loader import ToolLoadError, load_tools
 from Python.Src.Supervisor.remote import (
     A2AClient,
     A2AClientError,
-    RemoteA2ASkill,
-    load_remote_skills,
+    RemoteA2ATool,
+    load_remote_tools,
 )
 from Python.Src.Supervisor.session import SessionStore
-from Python.Src.Supervisor.skill import Skill, SkillCard, skill_to_tool
+from Python.Src.Supervisor.skill import (
+    LoadSkillTool,
+    Skill,
+    SkillRegistry,
+)
+from Python.Src.Supervisor.tool import Tool, ToolCard, to_langchain_tool
 
 __all__ = [
     "Supervisor", "SessionStore",
-    "Skill", "SkillCard", "skill_to_tool",
-    "load_skills", "SkillLoadError",
-    "discover_skills_from_path",
-    "RemoteA2ASkill", "load_remote_skills",
+    # Tool layer (LLM-callable)
+    "Tool", "ToolCard", "to_langchain_tool",
+    "load_tools", "ToolLoadError", "discover_tools_from_path",
+    # Skill layer (prompt / knowledge)
+    "Skill", "SkillRegistry", "LoadSkillTool",
+    # Agent layer (remote, via Tool)
+    "RemoteA2ATool", "load_remote_tools",
     "A2AClient", "A2AClientError",
 ]

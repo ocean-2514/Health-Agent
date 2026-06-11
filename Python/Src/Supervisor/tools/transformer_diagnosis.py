@@ -1,10 +1,12 @@
-"""Top-level skill — the entire transformer-defect-detection platform.
+"""Top-level Tool — the entire transformer-defect-detection platform.
 
 Wraps ``Python.Src.Agents.graph.run_diagnosis`` (the Phase 3-5 LangGraph +
-plugin platform) as a single ``Skill`` the supervisor can call. From the
-supervisor's view it is opaque: input = device + parameters; output =
-indicators + report. The inner four-agent collaboration, parallel
-inference, fusion, RUL and the search plugin all stay private.
+plugin platform) as a single ``Tool`` the supervisor can call. The inner
+graph is a deterministic **Workflow**; from the supervisor's view this Tool
+is opaque: input = device + parameters; output = indicators + report. The
+four-agent collaboration, parallel inference, fusion, RUL and the search
+plugin all stay private — and crucially stay *deterministic* (the LLM never
+reshapes the inner graph).
 
 Built on top of the platform registry (``build_platform_registry``) so any
 locally discovered plugin (e.g. the ``search_agent``) participates
@@ -25,7 +27,7 @@ if project_root not in sys.path:
 from Python.Src.Agents.graph import run_diagnosis
 from Python.Src.Agents.loader import build_platform_registry
 from Python.Src.Supervisor.session import SessionStore, default_store
-from Python.Src.Supervisor.skill import SkillCard
+from Python.Src.Supervisor.tool import ToolCard
 
 
 # ---------------------------------------------------------------------------
@@ -71,13 +73,13 @@ class TransformerDiagnosisOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Skill
+# Tool
 # ---------------------------------------------------------------------------
 
-class TransformerDiagnosisSkill:
-    """Outer-level skill that runs the inner platform end-to-end."""
+class TransformerDiagnosisTool:
+    """Outer-level Tool that runs the inner deterministic Workflow end-to-end."""
 
-    card = SkillCard(
+    card = ToolCard(
         name="transformer_diagnosis",
         description=(
             "对指定变压器执行一次完整健康诊断: 拉 IoTDB 数据 → BERT/CNN/YOLO "

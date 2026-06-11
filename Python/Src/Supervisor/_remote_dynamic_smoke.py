@@ -1,4 +1,4 @@
-"""Smoke test for Phase 8.7-8.10 — dynamic *remote* skill registration.
+"""Smoke test for dynamic *remote* tool registration.
 
 Requires the demo server::
 
@@ -8,16 +8,14 @@ Run::
 
     python -m Python.Src.Supervisor._remote_dynamic_smoke
 
-Checks (LLM still stubbed — we're testing the registry plumbing, not Ollama):
-
-  1. register_remote_skill(url) with no name → probes card, uses remote's name
+Checks (LLM stubbed — testing registry plumbing, not Ollama):
+  1. register_remote_tool(url) with no name → probes card, uses remote's name
   2. Probe-supplied description got the `[remote A2A agent @ ...]` suffix
-  3. register_remote_skill against a dead URL still registers (fallback name required)
-     and the description carries the `unreachable at registration` note
+  3. register_remote_tool against a dead URL still registers (fallback name
+     required) and description carries the `unreachable at registration` note
   4. Caller-supplied name overrides probed name
-  5. register_remote_skills_from_yaml reads Config/remote_skills.yaml and registers
-     (skipping duplicates from earlier steps)
-  6. The registered remote skill is callable end-to-end (real HTTP roundtrip)
+  5. register_remote_tools_from_yaml reads Config/remote_tools.yaml (skip dups)
+  6. The registered remote tool is callable end-to-end (real HTTP roundtrip)
 """
 from __future__ import annotations
 
@@ -36,7 +34,7 @@ except Exception:
 
 from pydantic import BaseModel
 
-from Python.Src.Supervisor.skill import SkillCard
+from Python.Src.Supervisor.tool import ToolCard
 
 
 class _NoIn(BaseModel):
@@ -47,81 +45,73 @@ class _Out(BaseModel):
     ok: bool = True
 
 
-def _stub_skill(name: str):
-    class _S:
-        card = SkillCard(name=name, description=f"stub {name}",
-                         input_model=_NoIn, output_model=_Out)
+def _stub_tool(name: str):
+    class _T:
+        card = ToolCard(name=name, description=f"stub {name}",
+                        input_model=_NoIn, output_model=_Out)
 
         def run(self, **kwargs):
             return _Out()
-    return _S()
+    return _T()
 
 
 def main() -> int:
-    print("=== Phase 8.7-8.10 remote dynamic registration ===\n")
+    print("=== remote dynamic registration smoke test ===\n")
 
     with patch("Python.Src.Supervisor.core.ChatOllama") as MockChat, \
-         patch("Python.Src.Supervisor.core.create_react_agent") as mock_build:
+         patch("Python.Src.Supervisor.core.create_react_agent") as mock_build, \
+         patch("Python.Src.Supervisor.core.SkillRegistry") as MockSkillReg:
         MockChat.return_value = MagicMock(name="fake-llm")
         mock_build.side_effect = lambda **kw: MagicMock(name="fake-agent", tools=kw["tools"])
+        empty_reg = MagicMock()
+        empty_reg.list.return_value = []
+        empty_reg.names = []
+        empty_reg.catalogue_text.return_value = ""
+        MockSkillReg.discover.return_value = empty_reg
 
         from Python.Src.Supervisor.core import Supervisor
 
-        sup = Supervisor(skills=[_stub_skill("seed")])
+        sup = Supervisor(tools=[_stub_tool("seed")])
 
-        print("[1] register_remote_skill probes card when name omitted")
-        name = sup.register_remote_skill("http://127.0.0.1:9001")
+        print("[1] register_remote_tool probes card when name omitted")
+        name = sup.register_remote_tool("http://127.0.0.1:9001")
         assert name == "FakeDefectSearch", f"got {name!r}"
         print(f"  ok, registered as {name!r} (from card)")
 
         print("\n[2] description got remote-agent suffix")
-        skill = next(s for n, s in sup._skills.items() if n == name)
-        desc = skill.card.description
-        print(f"  desc head: {desc[:80]!r}")
-        assert "[remote A2A agent @ http://127.0.0.1:9001]" in desc
+        tool = sup._tools[name]  # noqa: SLF001
+        assert "[remote A2A agent @ http://127.0.0.1:9001]" in tool.card.description
         print("  ok")
 
         print("\n[3] dead URL: still registers + unreachable note + fallback")
-        # Must pass an explicit name since the probe will fail and card has no name.
-        dead_name = sup.register_remote_skill(
-            "http://127.0.0.1:1",
-            name="dead_remote",
-            timeout_s=2,
+        dead_name = sup.register_remote_tool(
+            "http://127.0.0.1:1", name="dead_remote", timeout_s=2,
         )
         assert dead_name == "dead_remote"
-        dead = sup._skills["dead_remote"]
-        assert "unreachable at registration" in dead.card.description
-        print(f"  ok, desc: {dead.card.description}")
+        assert "unreachable at registration" in sup._tools["dead_remote"].card.description
+        print("  ok")
 
         print("\n[4] caller-supplied name overrides probed name")
-        nm = sup.register_remote_skill(
-            "http://127.0.0.1:9001",
-            name="my_custom_alias",
-        )
+        nm = sup.register_remote_tool("http://127.0.0.1:9001", name="my_custom_alias")
         assert nm == "my_custom_alias"
-        # The probed description should still be present
-        custom = sup._skills["my_custom_alias"]
-        assert "[remote A2A agent @ http://127.0.0.1:9001]" in custom.card.description
+        assert "[remote A2A agent @ http://127.0.0.1:9001]" in sup._tools["my_custom_alias"].card.description
         print(f"  ok, registered as {nm!r} (probed desc kept)")
 
-        print("\n[5] register_remote_skills_from_yaml — skips duplicates")
-        # Config/remote_skills.yaml declares defect_kb_search; not yet present
-        added = sup.register_remote_skills_from_yaml()
+        print("\n[5] register_remote_tools_from_yaml — skips duplicates")
+        added = sup.register_remote_tools_from_yaml()
         print(f"  added: {added}")
         assert "defect_kb_search" in added
-
-        # Run again — every entry now duplicates, nothing new
-        added2 = sup.register_remote_skills_from_yaml()
+        added2 = sup.register_remote_tools_from_yaml()
         assert added2 == []
         print("  ok, second call returned [] (idempotent)")
 
-        print("\n[6] end-to-end call through the dynamically-registered remote")
-        out = sup._skills["my_custom_alias"].run(instruction="过热的判据?")
+        print("\n[6] end-to-end call through dynamically-registered remote")
+        out = sup._tools["my_custom_alias"].run(instruction="过热的判据?")
         assert out.success, f"call failed: {out.error}"
         assert out.raw_json and "matches" in out.raw_json
         print(f"  ok, got {len(out.raw_json['matches'])} matches")
 
-        print(f"\nfinal skill list: {sup.skill_names}")
+        print(f"\nfinal tool list: {sup.tool_names}")
 
     print("\n=== OK ===")
     return 0

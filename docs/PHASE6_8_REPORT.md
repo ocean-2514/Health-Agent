@@ -1,13 +1,20 @@
-# Phase 6-8 实验报告：外层 Supervisor 对话层、远程 A2A 接入与动态智能体注册
+# Phase 6-9 实验报告：外层 Supervisor 对话层、远程 A2A 接入、动态注册与 tool/skill/agent 三层正名
 
 | 项目 | 内容 |
 |---|---|
-| 报告时间 | 2026-06-05 |
-| 阶段 | Phase 6（Supervisor 对话层） + Phase 7（远程 A2A 接入） + Phase 8（动态注册） |
+| 报告时间 | 2026-06-11 |
+| 阶段 | Phase 6（Supervisor 对话层） + Phase 7（远程 A2A 接入） + Phase 8（动态注册） + Phase 9（三层正名 + 提示词 Skill 层） |
 | 分支 | `refactor/mcp-multi-agent` |
 | 提交 | （待提交） |
-| 变更规模 | +2608 行 / 23 个新文件（Supervisor 包 + a2a_demo_server + Config + 示例） |
+| 变更规模 | +2608 行（Phase 6-8） + Phase 9 三层重构（重命名 + 新增提示词 Skill 层 + 示例 SKILL.md） |
 | 新增依赖 | `langchain-ollama`, `a2a-sdk`（含 starlette/uvicorn extras） |
+
+> **术语变更（Phase 9）**：Phase 6-8 把所有 LLM 可调单元都叫 **Skill**，
+> 但它名不副实——它是"LLM 直调的可调函数"，业界惯例叫 **Tool**；而 **Skill**
+> 在 Claude Agent SDK / CodeWhale 里指的是"可加载的提示词/知识（SKILL.md）"。
+> Phase 9 据此正名：旧 `Skill`→`Tool`，并**新增**了真正的提示词 Skill 层。
+> **下文第一至六节保留 Phase 6-8 的历史叙述（仍用旧 "Skill" 称呼），
+> 当前生效的命名与架构见第七节。**
 
 ## 一、实验目标
 
@@ -434,32 +441,177 @@ HTTP。
 * **Skill 调用埋点**:把每次 tool call 的 latency / success / error
   写到 `tool_calls` 表,做观测;复用 Phase 3 的 `comm_log` 思路。
 
-## 七、复现实验
+## 七、Phase 9：tool / skill / agent 三层正名与提示词 Skill 层
+
+### 7.1 动机
+
+Phase 6-8 把一切 LLM 可调单元都包成 "Skill",最后又过一遍
+`skill_to_tool()` 变成 LangChain tool——也就是说这个 "Skill" 干的本就是
+**Tool**(function-calling 目标)的活。同时,业界(Claude Agent SDK /
+CodeWhale)语境里 **Skill 指的是"可加载的提示词/知识"**(一个含 `SKILL.md`
+的目录),是渐进披露的指令,而不是可调函数。两个含义撞名,且本项目缺失
+真正的"提示词 Skill"那一层——领域知识(DGA 判读、检修 SOP)只能写死在
+system prompt 里。
+
+Phase 9 确立**三层清晰边界**,并立一条铁律:
+
+> **LLM 直接能调的只有 Tool。Skill(知识)和 Agent(远程委派)都"经由
+> Tool 触达"。**
+
+### 7.2 三层定义(当前生效)
+
+| 层 | 是什么 | 契约 | 与 LLM 的关系 | 文件 |
+|---|---|---|---|---|
+| **Tool** | LLM 唯一直调单元 | `ToolCard + run()` | 直接 tool call | [tool.py](../Python/Src/Supervisor/tool.py) |
+| **Skill** | 可加载提示词/知识(SKILL.md) | `name + description + body` | 经内置 `load_skill` 注入上下文 | [skill.py](../Python/Src/Supervisor/skill.py) |
+| **Agent** | 远程 A2A 委派 | 经 Tool 触达 | 不直调,藏在 `RemoteA2ATool` 后 | [remote/](../Python/Src/Supervisor/remote/) |
+
+另外两个辅助概念:
+- **Workflow**:Phase 3-5 的确定性 LangGraph,被包成**一个 Tool**
+  (`transformer_diagnosis`)。坚决不让 LLM 动态改图——可复现是护城河。
+- **Primitive**:Phase 1 `Tools/` 的纯算子(本轮未改名,避免牵连 inner platform)。
+
+```
+Supervisor (LLM 编排) ── LLM 只会 tool call
+   ├─ load_skill(name)      → 注入领域知识     【Skill 层 = 提示词】
+   ├─ transformer_diagnosis → 触发确定性 Workflow 【Tool ← Workflow】
+   ├─ history_lookup        → 查历史            【Tool ← primitive】
+   └─ defect_kb_search      → 远程委派           【Tool ← Agent(A2A)】
+```
+
+### 7.3 改名映射(Skill → Tool 全线)
+
+| 旧(Phase 6-8) | 新(Phase 9) |
+|---|---|
+| `skill.py`：`Skill`/`SkillCard`/`skill_to_tool` | `tool.py`：`Tool`/`ToolCard`/`to_langchain_tool` |
+| `skills/` 目录、`*Skill` 类 | `tools/`、`TransformerDiagnosisTool`/`HistoryLookupTool` |
+| `RemoteA2ASkill` | `RemoteA2ATool` |
+| `load_skills` / `SkillLoadError` / `discover_skills_from_path` | `load_tools` / `ToolLoadError` / `discover_tools_from_path` |
+| `load_remote_skills` | `load_remote_tools` |
+| 目录扫描约定 `SKILL=` / `SKILLS=[...]` | `TOOL=` / `TOOLS=[...]` |
+| `Supervisor.register_skill*` / `skill_names` / `all_skill_names` / `disabled_skill_names` | `register_tool*` / `tool_names` / `all_tool_names` / `disabled_tool_names` |
+| `Config/skills.yaml`（键 `skills:`） | `Config/tools.yaml`（键 `tools:`） |
+| `Config/remote_skills.yaml`（键 `remote_skills:`） | `Config/remote_tools.yaml`（键 `remote_tools:`） |
+| `examples/hot_skills/` | `examples/hot_tools/` |
+
+`skill.py` 这个名字腾出来后,正好留给**新的提示词 Skill 层**。
+
+### 7.4 新增：提示词 Skill 层
+
+[skill.py](../Python/Src/Supervisor/skill.py) 实现:
+
+```python
+@dataclass(frozen=True)
+class Skill:                 # 一个 SKILL.md 的解析结果
+    name: str
+    description: str
+    body: str               # markdown 指令正文
+    path: Path
+    companion_files: List[Path]
+
+class SkillRegistry:        # 扫描目录树发现 SKILL.md
+    @classmethod
+    def discover(cls, dirs) -> "SkillRegistry": ...
+    def catalogue_text(self) -> str:    # 一行一个 name+description, 给系统提示
+```
+
+**Skill 目录布局**(对齐 CodeWhale / agentskills 约定,首个命中优先):
+
+```
+skills/<name>/SKILL.md            ← 项目级
+.agents/skills/<name>/SKILL.md    ← 项目级
+~/.healthagent/skills/  /  ~/.claude/skills/   ← 全局
+```
+
+`SKILL.md` = YAML frontmatter(`name`/`description`)+ markdown 正文。
+
+**两步渐进披露**(节省上下文预算):
+
+1. Supervisor 启动时把每个 Skill 的**一行 name+description** 注入 system
+   prompt 的 `## 可用知识技能` 段(`catalogue_text()`),**不放正文**。
+2. LLM 判断相关时调内置 Tool `load_skill(name)`(`LoadSkillTool`),返回
+   该 Skill 的**完整正文**作为 tool 结果 → 进入下一轮上下文。
+
+也就是说:**Skill 的"调用" = LLM 调 `load_skill` 这个 Tool 把知识正文当
+tool 结果读进来**,走的就是普通 function-calling 通道,只不过返回的是指令
+文本而非计算结果。
+
+`Supervisor._rebuild_agent()` 里,只要 registry 有 skill 就把
+`LoadSkillTool` 追加到工具列表;`_build_prompt()` 动态拼接 catalogue。
+
+**两个示例领域 Skill**:
+- [skills/dga-interpretation/SKILL.md](../skills/dga-interpretation/SKILL.md)
+  —— DGA 三比值法 / Duval 三角的判读流程(IEC 60599)
+- [skills/maintenance-report/SKILL.md](../skills/maintenance-report/SKILL.md)
+  —— 检修建议报告的五段式结构与写作规范
+
+### 7.5 CLI 命令(Phase 9 后)
+
+```
+tools:   /tools  /register <class_path>  /unregister <name>
+         /enable <name>  /disable <name>  /load_dir <path>
+remote:  /register_remote <url> [name]  /load_remote_yaml [path]
+skills:  /skills  /load_skill <name>  /reload_skills
+```
+
+`/tools` 列可调工具(禁用项标 `[disabled]`);`/skills` 列知识技能;
+`/load_skill <name>` 预览某 Skill 正文;`/reload_skills` 重扫目录。
+
+### 7.6 Phase 9 烟测(4 套 / 27 检查点全过)
+
+LLM 与 `create_react_agent` 在离线测里用 `unittest.mock.patch` 打桩;
+远程两套依赖本机 demo server。
+
+| 套件 | 覆盖 | 检查点 |
+|---|---|---|
+| [_skill_smoke.py](../Python/Src/Supervisor/_skill_smoke.py) | SKILL.md 发现 + `load_skill` + catalogue 注入 prompt | 6 |
+| [_dynamic_smoke.py](../Python/Src/Supervisor/_dynamic_smoke.py) | Tool 动态增删启禁 + 批量单次重建 | 10 |
+| [remote/_smoke.py](../Python/Src/Supervisor/remote/_smoke.py) | 远程 Tool 端到端 + 宽松探活 | 5 |
+| [_remote_dynamic_smoke.py](../Python/Src/Supervisor/_remote_dynamic_smoke.py) | 远程动态注册 | 6 |
+
+关键验证:`_skill_smoke` 确认 Supervisor 把 `## 可用知识技能` 写进 prompt
+且 `load_skill` 已挂入工具列表;其余三套是 Phase 7/8 同等覆盖在新命名下
+继续全绿。包 `import Python.Src.Supervisor` 干净,无残留旧标识符。
+
+### 7.7 收益
+
+- **命名与业界对齐**:Tool=可调、Skill=知识、Agent=委派,各归其位;
+  消除"tool 一词三义"与"skill 名不副实"。
+- **领域知识可维护**:DGA 判读 / 报告规范从 system prompt 抽到 `SKILL.md`,
+  改判读逻辑不动代码,且按需加载不占首轮预算。
+- **零行为回归**:Tool 调用链、动态注册、远程 A2A 全部行为不变,仅换名 +
+  补一层。
+
+## 八、复现实验
 
 ```bash
 conda activate healthAgent
 pip install -r requirements.txt   # 含 langchain-ollama + a2a-sdk
 
-# 1) Phase 6 多轮对话(默认会自动加载 Config/remote_skills.yaml 里的远程)
+# 1) 多轮对话(自动加载 Config/tools.yaml + remote_tools.yaml + skills/ 下的 SKILL.md)
 python Python/Src/Supervisor/chat_cli.py
 
-# 2) Phase 7 端到端联调
+# 2) 提示词 Skill 层(离线, 不依赖 Ollama / 网络)
+python -m Python.Src.Supervisor._skill_smoke
+
+# 3) 动态 Tool 注册(LLM 已 mock)
+python -m Python.Src.Supervisor._dynamic_smoke
+
+# 4) 远程 A2A 端到端联调
 #    终端 A:
 python -m a2a_demo_server.fake_search_server
 #    终端 B:
 python -m Python.Src.Supervisor.remote._smoke
-
-# 3) Phase 8 动态注册(LLM 已 mock,不依赖 Ollama)
-python -m Python.Src.Supervisor._dynamic_smoke
-
-# 4) Phase 8.7-8.10 远程动态(需先起 demo server)
+#    远程动态注册(同样需先起 demo server):
 python -m Python.Src.Supervisor._remote_dynamic_smoke
 ```
 
-## 八、参考
+## 九、参考
 
 * LangGraph `create_react_agent`:<https://langchain-ai.github.io/langgraph/reference/prebuilt/>
 * A2A Protocol:<https://a2a-protocol.org/>
+* Claude Agent SDK / Skill(SKILL.md)约定:<https://docs.claude.com/>
 * Phase 2 报告:[docs/PHASE2_REPORT.md](PHASE2_REPORT.md)
 * Phase 3 报告:[docs/PHASE3_REPORT.md](PHASE3_REPORT.md)
 * 参考项目(SupervisorAgent.register_expert):`D:/code/AI/project/agent`
+* Phase 9 三层划分参考(Rust 实现的 Claude Code 分支,tool/skill/agent 分得很干净):`D:/code/AI/project/CodeWhale`

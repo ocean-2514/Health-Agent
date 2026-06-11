@@ -1,16 +1,17 @@
-"""Adapter: a remote A2A agent looks like one local ``Skill``.
+"""Adapter: a remote A2A **agent** looks like one local ``Tool``.
 
-The Supervisor's tool-calling LLM doesn't care whether the implementation
-is a Python class, an in-process LangGraph pipeline, or an HTTP call to
-another process — every Skill exposes the same shape:
-``SkillCard(name, description, input_model, output_model)`` + ``run()``.
+A remote A2A peer is conceptually an *Agent* (it serves its own AgentCard,
+runs its own loop). The Supervisor's LLM never talks to it directly —
+following the platform rule "the LLM only calls Tools", the remote agent is
+*reached through* this Tool wrapper. From the LLM's side it is just another
+``transformer_diagnosis``-shaped entry in the tool list.
 
 Input / output deliberately stay generic (``instruction`` in, ``text`` +
-optional ``raw_json`` out): A2A messages are typed only at the parts
-level (``text`` / ``data`` / ``raw``), so forcing per-remote Pydantic
-schemas here would either be a YAML-encoded model (fragile) or an extra
-Python file per remote agent (boilerplate). The LLM is comfortable with
-"natural-language instruction in, natural-language reply out".
+optional ``raw_json`` out): A2A messages are typed only at the parts level
+(``text`` / ``data`` / ``raw``), so forcing per-remote Pydantic schemas
+here would either be a YAML-encoded model (fragile) or an extra Python file
+per remote agent (boilerplate). The LLM is comfortable with "natural-
+language instruction in, natural-language reply out".
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 from Python.Src.Supervisor.remote.a2a_client import A2AClient, A2AClientError
-from Python.Src.Supervisor.skill import SkillCard
+from Python.Src.Supervisor.tool import ToolCard
 
 
 class RemoteA2AInput(BaseModel):
@@ -46,8 +47,8 @@ class RemoteA2AOutput(BaseModel):
     error: Optional[str] = None
 
 
-class RemoteA2ASkill:
-    """Wraps one A2A endpoint as a Skill.
+class RemoteA2ATool:
+    """Wraps one A2A endpoint as a Tool.
 
     Failures (transport, no reply, schema) are returned as ``success=False``
     rather than raised — the Supervisor's LangChain tool layer would
@@ -67,7 +68,7 @@ class RemoteA2ASkill:
         self.url = url
         self.timeout_s = timeout_s
         self._client = client or A2AClient(default_timeout_s=timeout_s)
-        self.card = SkillCard(
+        self.card = ToolCard(
             name=name,
             description=description,
             input_model=RemoteA2AInput,

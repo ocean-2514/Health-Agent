@@ -1,4 +1,4 @@
-"""Two-in-one: demonstrates the ``SKILLS = [...]`` plural form."""
+"""Two-in-one: demonstrates the ``TOOLS = [...]`` plural form."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from Python.Src.Supervisor.skill import SkillCard
+from Python.Src.Supervisor.tool import ToolCard
 
 
 class _NoInput(BaseModel):
@@ -18,8 +18,8 @@ class _TimeOut(BaseModel):
     weekday: str
 
 
-class CurrentTimeSkill:
-    card = SkillCard(
+class CurrentTimeTool:
+    card = ToolCard(
         name="current_time",
         description="Returns the agent host's current local time.",
         input_model=_NoInput,
@@ -35,8 +35,8 @@ class _YearOut(BaseModel):
     year: int
 
 
-class CurrentYearSkill:
-    card = SkillCard(
+class CurrentYearTool:
+    card = ToolCard(
         name="current_year",
         description="Returns the agent host's current year as an integer.",
         input_model=_NoInput,
@@ -47,4 +47,4 @@ class CurrentYearSkill:
         return _YearOut(year=datetime.now().year)
 
 
-SKILLS = [CurrentTimeSkill(), CurrentYearSkill()]
+TOOLS = [CurrentTimeTool(), CurrentYearTool()]
