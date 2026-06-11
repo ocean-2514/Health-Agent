@@ -2,8 +2,8 @@ import React from 'react';
 
 type LayoutProps = {
     children: React.ReactNode;
-    activeTab: 'fleet' | 'reasoning' | 'approval';
-    setActiveTab: (tab: 'fleet' | 'reasoning' | 'approval') => void;
+    activeTab: 'fleet' | 'reasoning' | 'approval' | 'agent';
+    setActiveTab: (tab: 'fleet' | 'reasoning' | 'approval' | 'agent') => void;
 };
 
 export default function Layout({ children, activeTab, setActiveTab }: LayoutProps) {
@@ -44,6 +44,12 @@ export default function Layout({ children, activeTab, setActiveTab }: LayoutProp
                             onClick={() => setActiveTab('approval')}
                         >
                             专家复核
+                        </TabButton>
+                        <TabButton
+                            active={activeTab === 'agent'}
+                            onClick={() => setActiveTab('agent')}
+                        >
+                            智能体平台
                         </TabButton>
                     </nav>
                 </div>

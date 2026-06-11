@@ -296,22 +296,34 @@ class Supervisor:
 
     def chat(self, session_id: str, user_input: str) -> str:
         """Run one chat turn against ``session_id`` and return the answer."""
+        return self.chat_verbose(session_id, user_input)["answer"]
+
+    def chat_verbose(self, session_id: str, user_input: str) -> Dict[str, Any]:
+        """Like :meth:`chat`, but also reports which Tools the LLM called.
+
+        Returns ``{"answer": str, "tool_calls": [{"name", "args"}, ...]}``.
+        Used by the HTTP API so the frontend can show "调用了
+        transformer_diagnosis" alongside the natural-language answer.
+        """
         messages: List[BaseMessage] = self._load_history(session_id)
         messages.append(HumanMessage(content=user_input))
 
+        tool_calls: List[Dict[str, Any]] = []
         try:
             result = self._agent.invoke({"messages": messages})
         except Exception as e:  # noqa: BLE001
             answer = f"[supervisor 内部错误] {e}"
         else:
-            answer = self._extract_final_answer(result.get("messages", []))
+            trace = result.get("messages", [])
+            tool_calls = self._extract_tool_calls(trace)
+            answer = self._extract_final_answer(trace)
 
         if not answer:
             answer = "(模型未返回有效内容)"
 
         self._store.save_message(session_id, "user", user_input)
         self._store.save_message(session_id, "assistant", answer)
-        return answer
+        return {"answer": answer, "tool_calls": tool_calls}
 
     def new_session(self) -> str:
         return self._store.create_session()
@@ -336,6 +348,26 @@ class Supervisor:
     def skill_names(self) -> List[str]:
         """Prompt-style Skill names available for load_skill."""
         return self._skill_registry.names
+
+    @property
+    def tool_catalogue(self) -> List[Dict[str, Any]]:
+        """Name + description + disabled flag for every registered Tool."""
+        return [
+            {
+                "name": n,
+                "description": t.card.description,
+                "disabled": n in self._disabled,
+            }
+            for n, t in self._tools.items()
+        ]
+
+    @property
+    def skill_catalogue(self) -> List[Dict[str, Any]]:
+        """Name + description for every discovered prompt-style Skill."""
+        return [
+            {"name": s.name, "description": s.description}
+            for s in self._skill_registry.list()
+        ]
 
     # ============================================================ internals
 
@@ -387,6 +419,23 @@ class Supervisor:
             elif role == "assistant":
                 msgs.append(AIMessage(content=content))
         return msgs
+
+    @staticmethod
+    def _extract_tool_calls(messages: Sequence[BaseMessage]) -> List[Dict[str, Any]]:
+        """Pull every tool call the LLM emitted out of the agent trace,
+        in order. Each entry is ``{"name": str, "args": dict}``."""
+        calls: List[Dict[str, Any]] = []
+        for msg in messages:
+            tcs = getattr(msg, "tool_calls", None)
+            if not tcs:
+                continue
+            for tc in tcs:
+                # LangChain tool_calls are dicts: {name, args, id, type}
+                name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+                args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {})
+                if name:
+                    calls.append({"name": name, "args": args or {}})
+        return calls
 
     @staticmethod
     def _extract_final_answer(messages: Sequence[BaseMessage]) -> str:

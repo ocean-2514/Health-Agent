@@ -2,6 +2,8 @@
 
 const isMock = false; // Set to false to connect to the real Python backend at localhost:8000
 
+export const API_BASE = "http://localhost:8000";
+
 export const assessHealth = async (data: any) => {
     if (isMock) {
         // Return a mocked response closely resembling what the engine would produce
@@ -65,3 +67,118 @@ export const assessDefect = async (data: any) => {
     });
     return response.json();
 }
+
+// ===========================================================================
+// Multi-agent platform (Supervisor) — the refactored Tool/Skill/Agent stack
+// ===========================================================================
+
+export type ToolCall = { name: string; args: Record<string, any> };
+
+export type AgentChatResp = {
+    session_id: string;
+    answer: string;
+    tool_calls: ToolCall[];
+};
+
+export type CatalogueItem = { name: string; description: string; disabled?: boolean };
+
+export type AgentCatalogue = { tools: CatalogueItem[]; skills: CatalogueItem[] };
+
+/** One chat turn. Pass `session_id` to continue a conversation; omit it to
+ * start a new one (the returned `session_id` is the created/used id). */
+export const agentChat = async (
+    message: string,
+    sessionId?: string
+): Promise<AgentChatResp> => {
+    const response = await fetch(`${API_BASE}/api/agent/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, session_id: sessionId ?? null }),
+    });
+    if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        throw new Error(detail?.detail || `请求失败 (${response.status})`);
+    }
+    return response.json();
+};
+
+export const agentNewSession = async (): Promise<string> => {
+    const response = await fetch(`${API_BASE}/api/agent/session`, { method: "POST" });
+    const data = await response.json();
+    return data.session_id;
+};
+
+export const agentHistory = async (
+    sessionId: string
+): Promise<{ role: string; content: string }[]> => {
+    const response = await fetch(`${API_BASE}/api/agent/session/${sessionId}/history`);
+    if (!response.ok) return [];
+    const data = await response.json();
+    return data.messages ?? [];
+};
+
+export const agentCatalogue = async (): Promise<AgentCatalogue> => {
+    const response = await fetch(`${API_BASE}/api/agent/catalogue`);
+    if (!response.ok) return { tools: [], skills: [] };
+    return response.json();
+};
+
+export type SessionInfo = {
+    session_id: string;
+    created_at: string;
+    last_active: string;
+    message_count: number;
+};
+
+export const agentSessions = async (limit = 30): Promise<SessionInfo[]> => {
+    const response = await fetch(`${API_BASE}/api/agent/sessions?limit=${limit}`);
+    if (!response.ok) return [];
+    const data = await response.json();
+    return data.sessions ?? [];
+};
+
+export const agentDeleteSession = async (sessionId: string): Promise<void> => {
+    await fetch(`${API_BASE}/api/agent/session/${sessionId}`, { method: 'DELETE' });
+};
+
+// ---- hot-loading (mutates the live registry, returns fresh catalogue) ----
+
+const postCatalogue = async (path: string, body?: any): Promise<AgentCatalogue> => {
+    const response = await fetch(`${API_BASE}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        throw new Error(detail?.detail || `请求失败 (${response.status})`);
+    }
+    return response.json();
+};
+
+export const agentReloadSkills = (): Promise<AgentCatalogue> =>
+    postCatalogue('/api/agent/reload_skills');
+
+export const agentRegisterRemote = (url: string, name?: string): Promise<AgentCatalogue> =>
+    postCatalogue('/api/agent/tools/register_remote', { url, name: name ?? null });
+
+export const agentReloadRemote = (): Promise<AgentCatalogue> =>
+    postCatalogue('/api/agent/tools/reload_remote');
+
+export const agentLoadDir = (path: string): Promise<AgentCatalogue> =>
+    postCatalogue('/api/agent/tools/load_dir', { path });
+
+export const agentEnableTool = (name: string): Promise<AgentCatalogue> =>
+    postCatalogue(`/api/agent/tools/${name}/enable`);
+
+export const agentDisableTool = (name: string): Promise<AgentCatalogue> =>
+    postCatalogue(`/api/agent/tools/${name}/disable`);
+
+export const agentRemoveTool = async (name: string): Promise<AgentCatalogue> => {
+    const response = await fetch(`${API_BASE}/api/agent/tools/${name}`, { method: 'DELETE' });
+    if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        throw new Error(detail?.detail || `请求失败 (${response.status})`);
+    }
+    return response.json();
+};

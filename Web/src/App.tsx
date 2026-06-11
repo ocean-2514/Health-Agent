@@ -3,9 +3,10 @@ import Layout from './components/Layout';
 import FleetDashboard from './pages/FleetDashboard';
 import ReasoningHub from './pages/ReasoningHub';
 import ApprovalWorkspace from './pages/ApprovalWorkspace';
+import AgentConsole from './pages/AgentConsole';
 
 function App() {
-  const [activeTab, setActiveTab] = useState<'fleet' | 'reasoning' | 'approval'>('fleet');
+  const [activeTab, setActiveTab] = useState<'fleet' | 'reasoning' | 'approval' | 'agent'>('fleet');
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('tr01');
   const [selectedSubstationId, setSelectedSubstationId] = useState<string>('station1');
 
@@ -29,6 +30,9 @@ function App() {
       )}
       {activeTab === 'approval' && (
         <ApprovalWorkspace />
+      )}
+      {activeTab === 'agent' && (
+        <AgentConsole />
       )}
     </Layout>
   );
