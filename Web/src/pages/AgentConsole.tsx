@@ -8,6 +8,7 @@ import {
     agentDeleteSession, agentReloadSkills, agentRegisterRemote, agentReloadRemote,
     agentLoadDir, agentEnableTool, agentDisableTool, agentRemoveTool,
     type ToolCall, type CatalogueItem, type SessionInfo, type AgentCatalogue,
+    type MutationResult,
 } from '../lib/api';
 
 type ChatMsg = {
@@ -226,14 +227,23 @@ function CapabilityPanel({
 }) {
     const [busy, setBusy] = useState<string | null>(null);
     const [remoteUrl, setRemoteUrl] = useState('');
+    const [remoteName, setRemoteName] = useState('');
     const [dirPath, setDirPath] = useState('');
     const [err, setErr] = useState<string | null>(null);
+    const [msg, setMsg] = useState<string | null>(null);
 
-    const run = async (key: string, fn: () => Promise<AgentCatalogue>) => {
+    const run = async (
+        key: string,
+        fn: () => Promise<MutationResult>,
+        describe?: (r: MutationResult) => string,
+    ) => {
         setBusy(key);
         setErr(null);
+        setMsg(null);
         try {
-            onCatalogue(await fn());
+            const r = await fn();
+            onCatalogue(r);
+            if (describe) setMsg(describe(r));
         } catch (e: any) {
             setErr(e?.message || '操作失败');
         } finally {
@@ -251,6 +261,11 @@ function CapabilityPanel({
             {err && (
                 <div className="glass-panel rounded-2xl p-3 text-xs text-red-300/90 border border-red-500/20">
                     {err}
+                </div>
+            )}
+            {msg && (
+                <div className="glass-panel rounded-2xl p-3 text-xs text-emerald-300/90 border border-emerald-500/20">
+                    {msg}
                 </div>
             )}
 
@@ -299,28 +314,35 @@ function CapabilityPanel({
                     <div className="flex items-center text-[11px] text-gray-500">
                         <Cloud className="w-3.5 h-3.5 mr-1" /> 热加载远程 A2A 工具
                     </div>
+                    <input
+                        value={remoteUrl}
+                        onChange={(e) => setRemoteUrl(e.target.value)}
+                        placeholder="http://host:port"
+                        className="w-full bg-white/5 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-cyan-500/50"
+                    />
                     <div className="flex gap-1.5">
                         <input
-                            value={remoteUrl}
-                            onChange={(e) => setRemoteUrl(e.target.value)}
-                            placeholder="http://host:port"
+                            value={remoteName}
+                            onChange={(e) => setRemoteName(e.target.value)}
+                            placeholder="名称(可选, 探活失败时必填)"
                             className="flex-1 min-w-0 bg-white/5 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-cyan-500/50"
                         />
                         <button
                             disabled={!!busy || !remoteUrl.trim()}
                             onClick={() => run('add-remote', async () => {
-                                const c = await agentRegisterRemote(remoteUrl.trim());
-                                setRemoteUrl('');
+                                const c = await agentRegisterRemote(remoteUrl.trim(), remoteName.trim() || undefined);
+                                setRemoteUrl(''); setRemoteName('');
                                 return c;
-                            })}
-                            className="px-2.5 rounded-lg bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs hover:bg-cyan-500/30 disabled:opacity-40"
+                            }, (r) => `已注册远程工具: ${r.registered}`)}
+                            className="px-3 rounded-lg bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs hover:bg-cyan-500/30 disabled:opacity-40"
                         >
                             {busy === 'add-remote' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '加'}
                         </button>
                     </div>
                     <button
                         disabled={!!busy}
-                        onClick={() => run('reload-remote', agentReloadRemote)}
+                        onClick={() => run('reload-remote', agentReloadRemote,
+                            (r) => (r.added?.length ? `新增远程: ${r.added.join(', ')}` : '无新增(全部已注册或无 enabled 项)'))}
                         className="w-full text-[11px] py-1.5 rounded-lg bg-white/5 border border-white/10 text-gray-400 hover:text-gray-200 flex items-center justify-center gap-1 disabled:opacity-40"
                     >
                         <RefreshCw className={`w-3 h-3 ${busy === 'reload-remote' ? 'animate-spin' : ''}`} /> 重载 remote_tools.yaml
@@ -331,7 +353,6 @@ function CapabilityPanel({
                 <div className="mt-3 pt-3 border-t border-white/10 space-y-2">
                     <div className="flex items-center text-[11px] text-gray-500">
                         <FolderSearch className="w-3.5 h-3.5 mr-1" /> 扫描目录加载本地工具
-                        <span className="ml-1 text-gray-600">(TOOL/TOOLS)</span>
                     </div>
                     <div className="flex gap-1.5">
                         <input
@@ -346,13 +367,18 @@ function CapabilityPanel({
                                 const c = await agentLoadDir(dirPath.trim());
                                 setDirPath('');
                                 return c;
-                            })}
+                            }, (r) => (r.added?.length
+                                ? `新增工具: ${r.added.join(', ')}`
+                                : '未发现可加载工具(该目录 .py 需在模块级写 TOOL=... 或 TOOLS=[...])'))}
                             className="px-2.5 rounded-lg bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs hover:bg-cyan-500/30 disabled:opacity-40"
                         >
                             {busy === 'load-dir' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '扫描'}
                         </button>
                     </div>
-                    <p className="text-[10px] text-gray-600">相对路径以仓库根为基准</p>
+                    <p className="text-[10px] text-gray-600">
+                        相对路径以仓库根为基准。内置工具(tools/ 下)是类形式 + 在 tools.yaml 声明,
+                        不经此扫描;示例可填 <span className="text-gray-500">examples/hot_tools</span>。
+                    </p>
                 </div>
             </div>
 
@@ -375,7 +401,8 @@ function CapabilityPanel({
                 </div>
                 <button
                     disabled={!!busy}
-                    onClick={() => run('reload-skills', agentReloadSkills)}
+                    onClick={() => run('reload-skills', agentReloadSkills,
+                        (r) => `已重载知识技能 (${r.skills.length} 个)`)}
                     className="mt-3 w-full text-[11px] py-1.5 rounded-lg bg-violet-500/10 border border-violet-500/20 text-violet-300 hover:bg-violet-500/20 flex items-center justify-center gap-1 disabled:opacity-40"
                 >
                     <RefreshCw className={`w-3 h-3 ${busy === 'reload-skills' ? 'animate-spin' : ''}`} /> 重载知识技能 (扫描 SKILL.md)

@@ -1,57 +1,60 @@
 """Supervisor — the outer-layer LLM tool-calling orchestrator.
 
-Builds a LangGraph ReAct-style agent over a set of registered ``Tool``s.
-On each ``chat()`` turn it loads the session history from
-:class:`SessionStore`, runs the agent (which may invoke 0+ tools in
-sequence as the LLM decides), persists the new exchange, and returns the
-LLM's final answer.
+Runs a **self-controlled** tool-calling loop (see ``agent_loop.py``) over an
+OpenAI-compatible endpoint. The same code path serves Ollama
+(``/v1``) and cloud APIs like DeepSeek — switching providers is config-only
+(``LLM.Agent`` in ``GlobalConfig.yaml``). LangGraph's ``create_react_agent``
+black box is gone; owning the loop gives us tool-result protection,
+errors-as-data, retries, and a seam for context compression.
 
 Three cleanly separated concepts meet here (see ``tool.py`` / ``skill.py``):
 
   * **Tool**  — the only thing the LLM calls directly (function-calling).
-    A Tool may wrap a primitive, a deterministic Workflow (the Phase 3-5
-    diagnosis graph), or a remote Agent (A2A).
-  * **Skill** — loadable prompt / domain knowledge (``SKILL.md``). Surfaced
-    to the LLM as a one-line catalogue in the system prompt; the body is
-    pulled in on demand via the built-in ``load_skill`` Tool.
+    Wraps a primitive, a deterministic Workflow (the Phase 3-5 diagnosis
+    graph), or a remote Agent (A2A).
+  * **Skill** — loadable prompt / domain knowledge (``SKILL.md``), surfaced
+    as a catalogue in the system prompt; the body is pulled in on demand via
+    the built-in ``load_skill`` Tool.
   * **Agent** — an autonomous / remote delegate, reached *through* a Tool
     (e.g. ``RemoteA2ATool``), never called by the LLM directly.
 
-LangChain 1.x reorganised its agent API; the simplest portable choice is
-``langgraph.prebuilt.create_react_agent``, which compiles a tool-calling
-loop into a LangGraph StateGraph. The supervisor itself contains no domain
-logic.
-
-Dynamic Tool registry (mirrors the earlier ``D:/code/AI/project/agent``
-SupervisorAgent's ``register_expert``): ``register_tool`` /
-``unregister_tool`` / ``enable_tool`` / ``disable_tool`` /
-``register_tool_from_config`` / ``register_tools_from_path`` /
-``register_remote_tool`` / ``register_remote_tools_from_yaml`` all mutate
-the registry and recompile the underlying agent. There is no public
-LangGraph API to splice tools into a compiled graph, so each mutation
-triggers a rebuild — cheap relative to one LLM call, but batch mutations
-via ``register_tools`` to avoid N rebuilds.
+Dynamic Tool registry (``register_tool`` / ``unregister_tool`` /
+``enable_tool`` / ``disable_tool`` / ``register_tool_from_config`` /
+``register_tools_from_path`` / ``register_remote_tool`` /
+``register_remote_tools_from_yaml``) mutates a live ``OrderedDict``. Unlike
+the old compiled-graph design, there is **no rebuild step** — the active
+tool list is read fresh on every turn.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import re
 import sys
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
-from langchain_ollama import ChatOllama
-from langgraph.prebuilt import create_react_agent
+import openai
+from pydantic import BaseModel
 
 project_root = str(Path(__file__).resolve().parents[3])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from Python.Src.Middleware.GlobalConfig import GlobalConfig
+from Python.Src.Supervisor.agent_loop import AgentLoop, make_dispatch
+from Python.Src.Supervisor.memory import (
+    MAX_SESSION_MEMORY_BYTES,
+    SaveMemoryTool,
+    build_memory_prompt_section,
+    format_memories_for_injection,
+    select_relevant_memories,
+)
 from Python.Src.Supervisor.session import SessionStore, default_store
-from Python.Src.Supervisor.skill import LoadSkillTool, SkillRegistry
-from Python.Src.Supervisor.tool import Tool, to_langchain_tool
+from Python.Src.Supervisor.skill import AppendSkillMemoryTool, LoadSkillTool, SkillRegistry
+from Python.Src.Supervisor.tool import Tool
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +66,40 @@ _SYSTEM_PROMPT = (
     "  - 用户明确要求'诊断 / 体检 / 评估 / 查 RUL / 查健康指数' → 调 transformer_diagnosis\n"
     "  - 用户问'这台设备上次诊断结果 / 历史趋势' → 调 history_lookup(若已注册)\n"
     "  - 任务匹配某条'可用知识技能' → 先 load_skill 加载其正文, 再据此作答\n"
+    "  - 多个可并行的独立子任务(如同时诊断/对比多台变压器), 或读多会撑爆上下文的探索 → "
+    "用 spawn_agent 派子智能体(一次传多个任务会并发); 单个工具能办的小事不要 spawn\n"
     "  - 纯概念解释 / 寒暄 / follow-up(上一轮已给出的指标) → 直接作答, 不要重复调用工具\n"
     "  - 一次请求可以同时调多个独立工具, 提高效率\n\n"
     "工具返回结构化结果后, 用自然语言简洁回答用户; 数值类指标请直接引用, "
     "不要瞎编。"
 )
+
+
+def _configured(value: Any) -> bool:
+    """A config value counts as set only if non-empty and not a placeholder."""
+    return bool(value) and not str(value).startswith("YOUR_")
+
+
+# Raw context windows by model family (tokens). Used to size the compression
+# budget; overridable via LLM.Agent.EffectiveWindowOverride.
+_MODEL_CONTEXT = {
+    "deepseek": 128_000,
+    "gpt-oss": 32_000,
+    "qwen": 32_000,
+    "llama": 32_000,
+    "gpt-4o": 128_000,
+}
+_CONTEXT_RESERVE = 8_000   # leave room for the response
+_COMPACT_TRIGGER = 0.85    # compact when est. history > this fraction of effective
+_KEEP_RECENT_MESSAGES = 6  # ~3 exchanges kept verbatim after a compact
+
+
+def _raw_window_for(model: str) -> int:
+    m = model.lower()
+    for key, win in _MODEL_CONTEXT.items():
+        if key in m:
+            return win
+    return 32_000  # conservative default for unknown local models
 
 
 class Supervisor:
@@ -82,22 +114,57 @@ class Supervisor:
         skill_dirs: Optional[List[Path]] = None,
         model_name: Optional[str] = None,
         base_url: Optional[str] = None,
-        temperature: float = 0.0,
+        api_key: Optional[str] = None,
+        temperature: Optional[float] = None,
     ) -> None:
         if not tools:
             raise ValueError("Supervisor requires at least one Tool")
 
-        cfg = GlobalConfig.config.get("LLM", {}).get("Local", {})
-        self._model_name = model_name or cfg.get("ModelName", "gpt-oss:120b-cloud")
-        self._base_url = base_url or cfg.get("BaseURL", "http://localhost:11434")
-        self._temperature = temperature
+        llm = GlobalConfig.config.get("LLM", {})
+        agent_cfg = llm.get("Agent") or {}
+        local_cfg = llm.get("Local", {})
+
+        # Pick the backend: the Agent section wins only when its APIKey is a
+        # real key (so a placeholder DeepSeek block falls back to local Ollama
+        # out of the box). Explicit constructor args always override.
+        if _configured(agent_cfg.get("APIKey")):
+            src = agent_cfg
+            default_base = agent_cfg.get("BaseURL")
+        else:
+            src = local_cfg
+            # Ollama exposes an OpenAI-compatible API under /v1.
+            default_base = str(local_cfg.get("BaseURL", "http://localhost:11434")).rstrip("/") + "/v1"
+
+        self._base_url = base_url or default_base
+        self._api_key = api_key or src.get("APIKey") or "sk-noauth"
+        self._model_name = model_name or src.get("ModelName") or "gpt-oss:120b-cloud"
+        self._temperature = (
+            temperature if temperature is not None
+            else float(src.get("Temperature", 0.1))
+        )
+        max_tokens = int(agent_cfg.get("MaxTokens", 4096))
+        timeout = float(src.get("Timeout", 120))
+        max_retries = int(src.get("MaxRetries", 3))
+
+        override = int(agent_cfg.get("EffectiveWindowOverride", 0) or 0)
+        raw_window = override if override > 0 else _raw_window_for(self._model_name)
+        self._effective_window = max(raw_window - _CONTEXT_RESERVE, 4000)
+
+        client = openai.AsyncOpenAI(
+            base_url=self._base_url,
+            api_key=self._api_key,
+            timeout=timeout,
+        )
+        self._loop = AgentLoop(
+            client,
+            self._model_name,
+            max_tokens=max_tokens,
+            temperature=self._temperature,
+            max_retries=max_retries,
+            effective_window=self._effective_window,
+        )
 
         self._store = session_store
-        self._llm = ChatOllama(
-            model=self._model_name,
-            base_url=self._base_url,
-            temperature=self._temperature,
-        )
 
         # Prompt-style Skills (SKILL.md). Surfaced as a catalogue in the
         # system prompt; bodies loaded on demand via the built-in load_skill.
@@ -107,61 +174,41 @@ class Supervisor:
         # tools stay here so enable/disable is non-destructive.
         self._tools: "OrderedDict[str, Tool]" = OrderedDict()
         self._disabled: Set[str] = set()
+        self.register_tools(tools)
 
-        self.register_tools(tools)  # also performs the initial rebuild
+        # Per-session memory-recall state (Supervisor is shared across
+        # sessions, so keep surfaced/budget keyed by session id).
+        self._recall_surfaced: Dict[str, Set[str]] = {}
+        self._recall_bytes: Dict[str, int] = {}
 
     # =========================================================== dynamic API
 
     def register_tool(self, tool: Tool) -> str:
-        """Register one tool. If the name already exists it is overwritten
-        (matching the original ``register_expert`` semantics). Returns the
-        registered name."""
-        name = self._add_one(tool)
-        self._rebuild_agent()
-        return name
+        """Register one tool (overwrite on name clash). Returns the name."""
+        return self._add_one(tool)
 
     def register_tools(self, tools: Iterable[Tool]) -> List[str]:
-        """Batch register; one rebuild at the end (much cheaper than N)."""
-        names: List[str] = []
-        for t in tools:
-            names.append(self._add_one(t))
-        self._rebuild_agent()
-        return names
+        return [self._add_one(t) for t in tools]
 
     def unregister_tool(self, name: str) -> bool:
-        """Remove a tool (also clears any disabled flag). Returns whether
-        it was present."""
         present = name in self._tools
         self._tools.pop(name, None)
         self._disabled.discard(name)
-        if present:
-            self._rebuild_agent()
         return present
 
     def disable_tool(self, name: str) -> bool:
-        """Soft-disable: tool stays in the registry but is hidden from the
-        LLM until re-enabled. Returns whether anything changed."""
-        if name not in self._tools:
-            return False
-        if name in self._disabled:
+        if name not in self._tools or name in self._disabled:
             return False
         self._disabled.add(name)
-        self._rebuild_agent()
         return True
 
     def enable_tool(self, name: str) -> bool:
-        if name not in self._tools:
-            return False
-        if name not in self._disabled:
+        if name not in self._tools or name not in self._disabled:
             return False
         self._disabled.discard(name)
-        self._rebuild_agent()
         return True
 
     def register_tool_from_config(self, spec: Dict[str, Any]) -> str:
-        """Instantiate one tool from a spec dict (same shape as a YAML
-        entry) and register it. ``spec['class_path']`` and optional
-        ``init_kwargs`` are required; ``enabled: false`` is honoured."""
         from Python.Src.Supervisor.loader import _import_class, ToolLoadError
 
         if not spec.get("enabled", True):
@@ -184,14 +231,10 @@ class Supervisor:
     def register_tools_from_path(
         self, directory: str | Path, recursive: bool = True
     ) -> List[str]:
-        """Scan ``directory`` for Python modules that declare ``TOOL = ...``
-        or ``TOOLS = [...]`` at module level, and register each. Returns the
-        names of newly-registered tools (skipping anything whose name was
-        already present)."""
         from Python.Src.Supervisor.discovery import discover_tools_from_path
 
         discovered = discover_tools_from_path(directory, recursive=recursive)
-        new: List[Tool] = []
+        added: List[str] = []
         for t in discovered:
             name = getattr(t.card, "name", None)
             if not name:
@@ -200,10 +243,8 @@ class Supervisor:
             if name in self._tools:
                 logger.info("tool %r already registered, leaving existing", name)
                 continue
-            new.append(t)
-        if not new:
-            return []
-        return self.register_tools(new)
+            added.append(self._add_one(t))
+        return added
 
     def register_remote_tool(
         self,
@@ -213,14 +254,6 @@ class Supervisor:
         description: Optional[str] = None,
         timeout_s: float = 30.0,
     ) -> str:
-        """Hot-register a remote A2A agent by URL (wrapped as a Tool).
-
-        If ``name`` or ``description`` is missing, probe the remote's
-        agent card and use its ``name`` / ``description``. Probe failure
-        falls back to a synthesised description (matches the relaxed
-        startup behaviour in ``load_remote_tools``) so a temporarily-down
-        remote can still be registered for later use.
-        """
         from Python.Src.Supervisor.remote import (
             A2AClient,
             A2AClientError,
@@ -271,9 +304,6 @@ class Supervisor:
     def register_remote_tools_from_yaml(
         self, yaml_path: Optional[str | Path] = None
     ) -> List[str]:
-        """Load every enabled entry from a ``remote_tools.yaml`` file
-        (default: ``Config/remote_tools.yaml``) and register them. Reuses
-        the same loader + relaxed-probe behaviour as startup loading."""
         from Python.Src.Supervisor.remote import load_remote_tools
 
         path = Path(yaml_path) if yaml_path else None
@@ -286,40 +316,53 @@ class Supervisor:
     # ============================================================ skill API
 
     def reload_skills(self, skill_dirs: Optional[List[Path]] = None) -> List[str]:
-        """Re-discover prompt-style Skills from disk and rebuild. Returns the
-        current skill names."""
         self._skill_registry = SkillRegistry.discover(skill_dirs)
-        self._rebuild_agent()
         return self._skill_registry.names
 
     # ============================================================ chat path
 
     def chat(self, session_id: str, user_input: str) -> str:
-        """Run one chat turn against ``session_id`` and return the answer."""
         return self.chat_verbose(session_id, user_input)["answer"]
 
     def chat_verbose(self, session_id: str, user_input: str) -> Dict[str, Any]:
-        """Like :meth:`chat`, but also reports which Tools the LLM called.
+        """Run one chat turn against ``session_id``.
 
         Returns ``{"answer": str, "tool_calls": [{"name", "args"}, ...]}``.
-        Used by the HTTP API so the frontend can show "调用了
-        transformer_diagnosis" alongside the natural-language answer.
+
+        NOTE: synchronous wrapper around the async pipeline via ``asyncio.run``
+        — must NOT be called from inside a running event loop. The FastAPI
+        routes are sync (``def``, run in a threadpool) and the CLI is sync,
+        so this holds.
         """
-        messages: List[BaseMessage] = self._load_history(session_id)
-        messages.append(HumanMessage(content=user_input))
-
-        tool_calls: List[Dict[str, Any]] = []
         try:
-            result = self._agent.invoke({"messages": messages})
+            return asyncio.run(self._achat(session_id, user_input))
         except Exception as e:  # noqa: BLE001
-            answer = f"[supervisor 内部错误] {e}"
-        else:
-            trace = result.get("messages", [])
-            tool_calls = self._extract_tool_calls(trace)
-            answer = self._extract_final_answer(trace)
+            return {"answer": f"[supervisor 内部错误] {e}", "tool_calls": []}
 
-        if not answer:
-            answer = "(模型未返回有效内容)"
+    async def _achat(self, session_id: str, user_input: str) -> Dict[str, Any]:
+        history = await self._maybe_compact_and_load(session_id)
+
+        # Semantic memory recall — inject relevant cross-session memories
+        # as a system-reminder before the model sees the new input.
+        recalled = await self._recall_memories(session_id, user_input)
+        if recalled:
+            history = history + [
+                {"role": "user", "content": format_memories_for_injection(recalled)}
+            ]
+
+        active = self._active_tools()
+        by_name = {t.card.name: t for t in active}
+        dispatch = make_dispatch(by_name)
+
+        result = await self._loop.run(
+            system_prompt=self._build_prompt(),
+            history=history,
+            user_input=user_input,
+            tools=active,
+            dispatch=dispatch,
+        )
+        answer = result["answer"] or "(模型未返回有效内容)"
+        tool_calls = result.get("tool_calls", [])
 
         self._store.save_message(session_id, "user", user_input)
         self._store.save_message(session_id, "assistant", answer)
@@ -332,12 +375,10 @@ class Supervisor:
 
     @property
     def tool_names(self) -> List[str]:
-        """Tool names exposed to the LLM right now (excludes disabled)."""
         return [n for n in self._tools if n not in self._disabled]
 
     @property
     def all_tool_names(self) -> List[str]:
-        """All registered tool names, including disabled."""
         return list(self._tools.keys())
 
     @property
@@ -346,28 +387,25 @@ class Supervisor:
 
     @property
     def skill_names(self) -> List[str]:
-        """Prompt-style Skill names available for load_skill."""
         return self._skill_registry.names
 
     @property
     def tool_catalogue(self) -> List[Dict[str, Any]]:
-        """Name + description + disabled flag for every registered Tool."""
         return [
-            {
-                "name": n,
-                "description": t.card.description,
-                "disabled": n in self._disabled,
-            }
+            {"name": n, "description": t.card.description, "disabled": n in self._disabled}
             for n, t in self._tools.items()
         ]
 
     @property
     def skill_catalogue(self) -> List[Dict[str, Any]]:
-        """Name + description for every discovered prompt-style Skill."""
         return [
             {"name": s.name, "description": s.description}
             for s in self._skill_registry.list()
         ]
+
+    @property
+    def backend_info(self) -> Dict[str, Any]:
+        return {"model": self._model_name, "base_url": self._base_url}
 
     # ============================================================ internals
 
@@ -385,76 +423,122 @@ class Supervisor:
         self._disabled.discard(name)
         return name
 
+    def _active_tools(self) -> List[Tool]:
+        """Tools exposed to the LLM this turn: enabled registry tools + the
+        built-ins (load_skill when any prompt-Skill exists, save_memory always,
+        spawn_agent for delegation).
+
+        ``spawn_agent`` is built over the *other* active tools (its sub-agent
+        pool) and excludes itself — sub-agents therefore cannot spawn
+        (depth capped at 1)."""
+        from Python.Src.Supervisor.subagent import SpawnAgentTool
+
+        active: List[Tool] = [t for n, t in self._tools.items() if n not in self._disabled]
+        if self._skill_registry.list():
+            active.append(LoadSkillTool(self._skill_registry))
+            active.append(AppendSkillMemoryTool(self._skill_registry))
+        active.append(SaveMemoryTool())
+        # spawn_agent sees everything above as its sub-agent pool (no nesting).
+        pool = {t.card.name: t for t in active}
+        active.append(SpawnAgentTool(self._loop, pool))
+        return active
+
     def _build_prompt(self) -> str:
-        """System prompt + the Skill catalogue (progressive disclosure)."""
         prompt = _SYSTEM_PROMPT
         catalogue = self._skill_registry.catalogue_text()
         if catalogue:
             prompt += (
                 "\n\n## 可用知识技能\n"
-                "(用 load_skill(name) 加载正文后再作答)\n" + catalogue
+                "(用 load_skill(name) 加载正文+累积经验后再作答; "
+                "若在使用某技能时学到可复用教训, 用 append_skill_memory 记下)\n" + catalogue
             )
+        prompt += "\n\n" + build_memory_prompt_section()
         return prompt
 
-    def _rebuild_agent(self) -> None:
-        """Recompile the underlying ReAct agent over the currently-active
-        tools (+ the built-in load_skill if any Skill exists). Called by
-        every public mutator."""
-        active = [t for n, t in self._tools.items() if n not in self._disabled]
-        lc_tools = [to_langchain_tool(t) for t in active]
-        if self._skill_registry.list():
-            lc_tools.append(to_langchain_tool(LoadSkillTool(self._skill_registry)))
-        self._agent = create_react_agent(
-            model=self._llm,
-            tools=lc_tools,
-            prompt=self._build_prompt(),
+    async def _side_query(self, system: str, user: str) -> str:
+        return await self._loop.side_query(system, user)
+
+    async def _recall_memories(self, session_id: str, user_input: str):
+        """Semantic recall, gated: skip single-word queries and sessions whose
+        cumulative recall budget is spent. Never raises — recall must not break
+        a turn."""
+        if not re.search(r"\s", user_input.strip()):
+            return []
+        if self._recall_bytes.get(session_id, 0) >= MAX_SESSION_MEMORY_BYTES:
+            return []
+        surfaced = self._recall_surfaced.setdefault(session_id, set())
+        try:
+            mems = await select_relevant_memories(user_input, self._side_query, surfaced)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("memory recall failed for %s: %s", session_id, e)
+            return []
+        for m in mems:
+            surfaced.add(m.path)
+            self._recall_bytes[session_id] = (
+                self._recall_bytes.get(session_id, 0) + len(m.content.encode("utf-8"))
+            )
+        return mems
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """Cheap char/4 estimate — no extra API call."""
+        return len(text) // 4
+
+    def _summary_prefix(self, summary: str) -> List[Dict[str, Any]]:
+        """Render a rolling summary as a user+assistant pair so message
+        alternation stays clean for the next turn."""
+        return [
+            {"role": "user", "content": f"[对话摘要]\n{summary}"},
+            {"role": "assistant", "content": "已了解之前的对话上下文。"},
+        ]
+
+    async def _maybe_compact_and_load(self, session_id: str) -> List[Dict[str, Any]]:
+        """Load prior turns as OpenAI messages, summarising the older portion
+        when the replayed history would crowd the context window.
+
+        Our stored history is clean alternating user/assistant text (no tool
+        messages), so slicing it anywhere is safe — no tool_use/tool_result
+        pair can be orphaned. The rolling summary is persisted
+        (``session_summaries``) so we never re-summarise the same turns."""
+        summary_row = self._store.get_summary(session_id)
+        prior_summary = summary_row["summary"] if summary_row else ""
+        covered = summary_row["covered_until"] if summary_row else 0
+
+        active = self._store.get_messages(session_id, after_id=covered)
+
+        def render(rows: List[Dict[str, Any]], summary: str) -> List[Dict[str, Any]]:
+            msgs: List[Dict[str, Any]] = []
+            if summary:
+                msgs.extend(self._summary_prefix(summary))
+            msgs.extend(
+                {"role": r["role"], "content": r["content"]}
+                for r in rows
+                if r["role"] in ("user", "assistant") and r["content"]
+            )
+            return msgs
+
+        candidate = render(active, prior_summary)
+        est = self._estimate_tokens(self._build_prompt()) + sum(
+            self._estimate_tokens(m["content"]) for m in candidate
         )
+        if est <= self._effective_window * _COMPACT_TRIGGER or len(active) <= _KEEP_RECENT_MESSAGES:
+            return candidate
 
-    def _load_history(self, session_id: str) -> List[BaseMessage]:
-        msgs: List[BaseMessage] = []
-        for row in self._store.get_history(session_id):
-            role, content = row["role"], row["content"]
-            if role == "user":
-                msgs.append(HumanMessage(content=content))
-            elif role == "assistant":
-                msgs.append(AIMessage(content=content))
-        return msgs
-
-    @staticmethod
-    def _extract_tool_calls(messages: Sequence[BaseMessage]) -> List[Dict[str, Any]]:
-        """Pull every tool call the LLM emitted out of the agent trace,
-        in order. Each entry is ``{"name": str, "args": dict}``."""
-        calls: List[Dict[str, Any]] = []
-        for msg in messages:
-            tcs = getattr(msg, "tool_calls", None)
-            if not tcs:
-                continue
-            for tc in tcs:
-                # LangChain tool_calls are dicts: {name, args, id, type}
-                name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
-                args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {})
-                if name:
-                    calls.append({"name": name, "args": args or {}})
-        return calls
-
-    @staticmethod
-    def _extract_final_answer(messages: Sequence[BaseMessage]) -> str:
-        """Pull the last natural-language assistant message out of the agent
-        trace. Skips tool-call / tool-result frames."""
-        for msg in reversed(messages):
-            kind = getattr(msg, "type", "")
-            if kind == "tool":
-                continue
-            content = getattr(msg, "content", None)
-            if not content:
-                continue
-            if isinstance(content, list):
-                parts = [p.get("text", "") for p in content if isinstance(p, dict)]
-                joined = "".join(parts).strip()
-                if joined:
-                    return joined
-                continue
-            text = str(content).strip()
-            if text:
-                return text
-        return ""
+        # Compact: summarise everything except the most recent few messages.
+        to_summarize = active[:-_KEEP_RECENT_MESSAGES]
+        kept = active[-_KEEP_RECENT_MESSAGES:]
+        try:
+            new_summary = await self._loop.summarize(
+                prior_summary,
+                [{"role": r["role"], "content": r["content"]} for r in to_summarize],
+            )
+            new_covered = to_summarize[-1]["id"]
+            self._store.upsert_summary(session_id, new_summary, new_covered)
+            logger.info(
+                "compacted session %s: summarised %d msgs up to id %d",
+                session_id, len(to_summarize), new_covered,
+            )
+            return render(kept, new_summary)
+        except Exception as e:  # noqa: BLE001 — compaction failure must not break chat
+            logger.warning("auto-compact failed for %s: %s — using raw history", session_id, e)
+            return candidate

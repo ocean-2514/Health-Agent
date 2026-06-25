@@ -37,6 +37,8 @@ Commands:
     /skills               list available SKILL.md skills
     /load_skill <name>    preview a skill's body
     /reload_skills        re-scan skill directories
+  memory (cross-session):
+    /memory               list saved memories
   other:
     /quit                 exit
 """
@@ -73,6 +75,7 @@ def _print_help() -> None:
         "/enable <name>  /disable <name>  /load_dir <path>\n"
         "remote:  /register_remote <url> [name]  /load_remote_yaml [path]\n"
         "skills:  /skills  /load_skill <name>  /reload_skills\n"
+        "memory:  /memory\n"
         "other:   /quit"
     )
 
@@ -263,6 +266,14 @@ def main() -> int:
         if user_input == "/reload_skills":
             names = supervisor.reload_skills()
             print(f"已重载知识技能: {names}")
+            continue
+        if user_input == "/memory":
+            from Python.Src.Supervisor.memory import list_memories
+            mems = list_memories()
+            if not mems:
+                print("(暂无记忆)")
+            for m in mems:
+                print(f"  [{m.type}] {m.name} — {m.description}")
             continue
 
         if user_input.startswith("/"):

@@ -143,7 +143,14 @@ export const agentDeleteSession = async (sessionId: string): Promise<void> => {
 
 // ---- hot-loading (mutates the live registry, returns fresh catalogue) ----
 
-const postCatalogue = async (path: string, body?: any): Promise<AgentCatalogue> => {
+/** Catalogue + optional mutation metadata (added names / registered name). */
+export type MutationResult = AgentCatalogue & {
+    added?: string[];
+    registered?: string;
+    changed?: boolean;
+};
+
+const postMutation = async (path: string, body?: any): Promise<MutationResult> => {
     const response = await fetch(`${API_BASE}${path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -156,25 +163,25 @@ const postCatalogue = async (path: string, body?: any): Promise<AgentCatalogue> 
     return response.json();
 };
 
-export const agentReloadSkills = (): Promise<AgentCatalogue> =>
-    postCatalogue('/api/agent/reload_skills');
+export const agentReloadSkills = (): Promise<MutationResult> =>
+    postMutation('/api/agent/reload_skills');
 
-export const agentRegisterRemote = (url: string, name?: string): Promise<AgentCatalogue> =>
-    postCatalogue('/api/agent/tools/register_remote', { url, name: name ?? null });
+export const agentRegisterRemote = (url: string, name?: string): Promise<MutationResult> =>
+    postMutation('/api/agent/tools/register_remote', { url, name: name ?? null });
 
-export const agentReloadRemote = (): Promise<AgentCatalogue> =>
-    postCatalogue('/api/agent/tools/reload_remote');
+export const agentReloadRemote = (): Promise<MutationResult> =>
+    postMutation('/api/agent/tools/reload_remote');
 
-export const agentLoadDir = (path: string): Promise<AgentCatalogue> =>
-    postCatalogue('/api/agent/tools/load_dir', { path });
+export const agentLoadDir = (path: string): Promise<MutationResult> =>
+    postMutation('/api/agent/tools/load_dir', { path });
 
-export const agentEnableTool = (name: string): Promise<AgentCatalogue> =>
-    postCatalogue(`/api/agent/tools/${name}/enable`);
+export const agentEnableTool = (name: string): Promise<MutationResult> =>
+    postMutation(`/api/agent/tools/${name}/enable`);
 
-export const agentDisableTool = (name: string): Promise<AgentCatalogue> =>
-    postCatalogue(`/api/agent/tools/${name}/disable`);
+export const agentDisableTool = (name: string): Promise<MutationResult> =>
+    postMutation(`/api/agent/tools/${name}/disable`);
 
-export const agentRemoveTool = async (name: string): Promise<AgentCatalogue> => {
+export const agentRemoveTool = async (name: string): Promise<MutationResult> => {
     const response = await fetch(`${API_BASE}/api/agent/tools/${name}`, { method: 'DELETE' });
     if (!response.ok) {
         const detail = await response.json().catch(() => ({}));

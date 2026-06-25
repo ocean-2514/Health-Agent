@@ -70,6 +70,13 @@ class SessionStore:
                 CREATE INDEX IF NOT EXISTS idx_messages_timestamp
                     ON messages(timestamp);
 
+                CREATE TABLE IF NOT EXISTS session_summaries (
+                    session_id    TEXT PRIMARY KEY,
+                    summary       TEXT NOT NULL,
+                    covered_until INTEGER NOT NULL DEFAULT 0,
+                    updated_at    INTEGER DEFAULT (strftime('%s','now') * 1000)
+                );
+
                 CREATE TABLE IF NOT EXISTS diagnosis_records (
                     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
                     equipment_id        TEXT NOT NULL,
@@ -134,9 +141,52 @@ class SessionStore:
             rows = cursor.fetchall()
         return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
+    def get_messages(self, session_id: str, after_id: int = 0,
+                     limit: int = 1000) -> List[Dict[str, Any]]:
+        """Messages in chronological order, **including row id**, optionally
+        only those after ``after_id``. Used by cross-turn auto-compact, which
+        needs ids to record how far a summary covers."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                "SELECT id, role, content FROM messages "
+                "WHERE session_id = ? AND id > ? ORDER BY id ASC LIMIT ?",
+                (session_id, after_id, limit),
+            )
+            rows = cursor.fetchall()
+        return [{"id": r["id"], "role": r["role"], "content": r["content"]} for r in rows]
+
+    def get_summary(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Return ``{summary, covered_until}`` for a session, or None."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.execute(
+                "SELECT summary, covered_until FROM session_summaries "
+                "WHERE session_id = ?",
+                (session_id,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        return {"summary": row["summary"], "covered_until": row["covered_until"]}
+
+    def upsert_summary(self, session_id: str, summary: str, covered_until: int) -> None:
+        """Store/replace the rolling conversation summary + how far it covers."""
+        ts = int(datetime.now().timestamp() * 1000)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO session_summaries (session_id, summary, covered_until, updated_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET "
+                "summary=excluded.summary, covered_until=excluded.covered_until, "
+                "updated_at=excluded.updated_at",
+                (session_id, summary, covered_until, ts),
+            )
+
     def delete_session(self, session_id: str) -> None:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM session_summaries WHERE session_id = ?", (session_id,))
             conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
 
     def session_exists(self, session_id: str) -> bool:

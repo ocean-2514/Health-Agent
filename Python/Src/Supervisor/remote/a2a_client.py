@@ -116,14 +116,14 @@ class A2AClient:
 
 if __name__ == "__main__":
     client = A2AClient()
-    url = "http://localhost:9001"
+    url = "http://localhost:9002"
     print(f"Discovering card at {url}...")
     try:
         card = client.discover_card(url)
-        # print("Card discovered:")
-        # print(json.dumps(card, indent=2))
-        print(client.send_text(url, "Hello, agent!"))
-        print("Message sent successfully.")
+        print("Card discovered:")
+        print(json.dumps(card, indent=2))
+        # print(client.send_text(url, "最近有哪些新闻"))
+        # print("Message sent successfully.")
     except A2AClientError as e:
         print(f"Error: {e}")
         exit(1)

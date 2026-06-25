@@ -48,3 +48,6 @@ scripts/
 # 第三方运行时与本地测试脚本 (Third-party & Local Tests)
 thirdparty/
 test_infer.py
+
+Config/GlobalConfig.yaml
+/var/*

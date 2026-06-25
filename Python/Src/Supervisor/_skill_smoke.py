@@ -80,23 +80,48 @@ def main() -> int:
     assert miss.found is False and miss.error
     print(f"  ok, error: {miss.error}")
 
-    print("\n[6] Supervisor injects catalogue + load_skill tool (LLM stubbed)")
-    with patch("Python.Src.Supervisor.core.ChatOllama") as MockChat, \
-         patch("Python.Src.Supervisor.core.create_react_agent") as mock_build:
-        MockChat.return_value = MagicMock(name="fake-llm")
-        mock_build.side_effect = lambda **kw: MagicMock(tools=kw["tools"], prompt=kw["prompt"])
+    print("\n[6] Supervisor injects catalogue + load_skill tool (openai client stubbed)")
+    with patch("Python.Src.Supervisor.core.openai.AsyncOpenAI", lambda **kw: MagicMock()):
         from Python.Src.Supervisor.core import Supervisor
 
         sup = Supervisor(tools=[_stub_tool("seed")], skill_dirs=[skills_dir])
-        kw = mock_build.call_args.kwargs
-        prompt = kw["prompt"]
-        tool_names = [t.name for t in kw["tools"]]
+        prompt = sup._build_prompt()                       # noqa: SLF001
+        tool_names = [t.card.name for t in sup._active_tools()]  # noqa: SLF001
         assert "## 可用知识技能" in prompt, "skill catalogue missing from prompt"
         assert "dga-interpretation" in prompt
         assert "load_skill" in tool_names, f"load_skill not wired: {tool_names}"
         assert sup.skill_names == reg.names
-        print(f"  ok, tools={tool_names}")
+        assert "append_skill_memory" in tool_names, f"append_skill_memory not wired: {tool_names}"
+        print(f"  ok, active tools={tool_names}")
         print(f"  prompt has catalogue: {'## 可用知识技能' in prompt}")
+
+    print("\n[7] skill-level memory (MUSE #1): append → load surfaces it")
+    import tempfile
+    from Python.Src.Supervisor.skill import AppendSkillMemoryTool, skill_memory_path
+    tmp = Path(tempfile.mkdtemp(prefix="ha_skillmem_"))
+    sdir = tmp / "demo-skill"
+    sdir.mkdir()
+    (sdir / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: 测试技能\n---\n这是技能正文。",
+        encoding="utf-8",
+    )
+    reg2 = SkillRegistry.discover([tmp])
+    sk = reg2.get("demo-skill")
+    assert sk is not None
+    # before: no memory
+    out0 = LoadSkillTool(reg2).run(name="demo-skill")
+    assert out0.memory == ""
+    # append a lesson via the tool
+    res = AppendSkillMemoryTool(reg2).run(skill_name="demo-skill", note="C2H2 缓增也要按电弧报警")
+    assert res.saved, res.error
+    assert skill_memory_path(sk).is_file()
+    # after: load surfaces the lesson
+    out1 = LoadSkillTool(reg2).run(name="demo-skill")
+    assert "C2H2 缓增" in out1.memory, out1.memory
+    # bad skill name
+    bad = AppendSkillMemoryTool(reg2).run(skill_name="nope", note="x")
+    assert not bad.saved and bad.error
+    print(f"  ok, memory after append: {out1.memory.strip()!r}")
 
     print("\n=== OK ===")
     return 0

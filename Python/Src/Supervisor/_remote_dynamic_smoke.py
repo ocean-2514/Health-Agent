@@ -58,20 +58,12 @@ def _stub_tool(name: str):
 def main() -> int:
     print("=== remote dynamic registration smoke test ===\n")
 
-    with patch("Python.Src.Supervisor.core.ChatOllama") as MockChat, \
-         patch("Python.Src.Supervisor.core.create_react_agent") as mock_build, \
-         patch("Python.Src.Supervisor.core.SkillRegistry") as MockSkillReg:
-        MockChat.return_value = MagicMock(name="fake-llm")
-        mock_build.side_effect = lambda **kw: MagicMock(name="fake-agent", tools=kw["tools"])
-        empty_reg = MagicMock()
-        empty_reg.list.return_value = []
-        empty_reg.names = []
-        empty_reg.catalogue_text.return_value = ""
-        MockSkillReg.discover.return_value = empty_reg
-
+    # openai client is built in __init__ but never used (we don't call chat here).
+    with patch("Python.Src.Supervisor.core.openai.AsyncOpenAI", lambda **kw: MagicMock()):
         from Python.Src.Supervisor.core import Supervisor
+        from Python.Src.Supervisor.skill import SkillRegistry
 
-        sup = Supervisor(tools=[_stub_tool("seed")])
+        sup = Supervisor(tools=[_stub_tool("seed")], skill_registry=SkillRegistry())
 
         print("[1] register_remote_tool probes card when name omitted")
         name = sup.register_remote_tool("http://127.0.0.1:9001")

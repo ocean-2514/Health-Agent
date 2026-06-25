@@ -94,7 +94,7 @@ def _catalogue_payload(sup) -> Dict[str, Any]:
 # --------------------------------------------------------------------------
 
 @router.post("/chat", response_model=ChatResp)
-async def chat(req: ChatReq):
+def chat(req: ChatReq):
     if not req.message or not req.message.strip():
         raise HTTPException(status_code=400, detail="message 不能为空")
     sup = _get_supervisor()
@@ -113,7 +113,7 @@ async def chat(req: ChatReq):
 
 
 @router.post("/session")
-async def new_session():
+def new_session():
     sup = _get_supervisor()
     return {"session_id": sup.new_session()}
 
@@ -134,10 +134,22 @@ async def session_history(session_id: str):
 
 
 @router.get("/catalogue")
-async def catalogue():
+def catalogue():
     """Tools (callable) + Skills (loadable knowledge) the agent currently has."""
     sup = _get_supervisor()
     return _catalogue_payload(sup)
+
+
+@router.get("/memory")
+def memory():
+    """Cross-session memories saved by the agent (newest first)."""
+    from Python.Src.Supervisor.memory import list_memories
+    return {
+        "memories": [
+            {"name": m.name, "description": m.description, "type": m.type, "filename": m.filename}
+            for m in list_memories()
+        ]
+    }
 
 
 # --------------------------------------------------------------------------
@@ -146,7 +158,7 @@ async def catalogue():
 # --------------------------------------------------------------------------
 
 @router.post("/reload_skills")
-async def reload_skills():
+def reload_skills():
     """Re-scan ``skills/*/SKILL.md`` from disk (picks up new / edited skills)."""
     sup = _get_supervisor()
     sup.reload_skills()
@@ -154,7 +166,7 @@ async def reload_skills():
 
 
 @router.post("/tools/register_remote")
-async def register_remote(req: RegisterRemoteReq):
+def register_remote(req: RegisterRemoteReq):
     """Hot-register a remote A2A agent by URL (wrapped as a Tool)."""
     if not req.url or not req.url.strip():
         raise HTTPException(status_code=400, detail="url 不能为空")
@@ -167,7 +179,7 @@ async def register_remote(req: RegisterRemoteReq):
 
 
 @router.post("/tools/reload_remote")
-async def reload_remote():
+def reload_remote():
     """Re-read ``Config/remote_tools.yaml`` and register any new remote tools."""
     sup = _get_supervisor()
     added = sup.register_remote_tools_from_yaml()
@@ -175,7 +187,7 @@ async def reload_remote():
 
 
 @router.post("/tools/load_dir")
-async def load_dir(req: LoadDirReq):
+def load_dir(req: LoadDirReq):
     """Scan a directory for Python modules exporting ``TOOL`` / ``TOOLS`` and
     register each (skips already-registered names). ``path`` may be absolute
     or relative to the repo root."""
@@ -196,21 +208,21 @@ async def load_dir(req: LoadDirReq):
 
 
 @router.post("/tools/{name}/enable")
-async def enable_tool(name: str):
+def enable_tool(name: str):
     sup = _get_supervisor()
     changed = sup.enable_tool(name)
     return {"changed": changed, **_catalogue_payload(sup)}
 
 
 @router.post("/tools/{name}/disable")
-async def disable_tool(name: str):
+def disable_tool(name: str):
     sup = _get_supervisor()
     changed = sup.disable_tool(name)
     return {"changed": changed, **_catalogue_payload(sup)}
 
 
 @router.delete("/tools/{name}")
-async def remove_tool(name: str):
+def remove_tool(name: str):
     sup = _get_supervisor()
     removed = sup.unregister_tool(name)
     if not removed:

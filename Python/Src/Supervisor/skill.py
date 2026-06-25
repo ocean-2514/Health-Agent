@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -41,6 +42,8 @@ from Python.Src.Supervisor.tool import ToolCard
 
 MAX_DESCRIPTION_CHARS = 280
 MAX_DISCOVERY_DEPTH = 6
+SKILL_MEMORY_FILENAME = "SKILL.memory.md"
+MAX_SKILL_MEMORY_CHARS = 4000   # cap surfaced per-skill memory
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +118,48 @@ def _parse_skill_md(path: Path, content: str) -> Optional[Skill]:
         path=path,
         companion_files=companions,
     )
+
+
+# ---------------------------------------------------------------------------
+# Skill-level memory (MUSE-style): each skill carries a SKILL.memory.md next
+# to its SKILL.md, accumulating lessons / caveats / corrections across tasks.
+# Surfaced alongside the skill body on load, so the agent benefits from
+# previously-learned experience without re-deriving it.
+# ---------------------------------------------------------------------------
+
+def skill_memory_path(skill: "Skill") -> Path:
+    return skill.path.parent / SKILL_MEMORY_FILENAME
+
+
+def read_skill_memory(skill: "Skill") -> str:
+    p = skill_memory_path(skill)
+    if not p.is_file():
+        return ""
+    try:
+        text = p.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if len(text) > MAX_SKILL_MEMORY_CHARS:
+        text = text[-MAX_SKILL_MEMORY_CHARS:]  # keep the most recent lessons
+    return text
+
+
+def append_skill_memory(skill: "Skill", note: str) -> bool:
+    """Append a dated lesson to the skill's memory file (create if missing).
+    Returns False if the location is not writable (e.g. a read-only global
+    skill dir)."""
+    note = note.strip()
+    if not note:
+        return False
+    p = skill_memory_path(skill)
+    header = f"# {skill.name} — 经验记忆\n\n" if not p.exists() else ""
+    entry = f"- [{date.today().isoformat()}] {note}\n"
+    try:
+        with p.open("a", encoding="utf-8") as f:
+            f.write(header + entry)
+        return True
+    except OSError:
+        return False
 
 
 class SkillRegistry:
@@ -199,6 +244,9 @@ class LoadSkillOutput(BaseModel):
     name: str
     found: bool
     body: str = ""
+    memory: str = Field(
+        "", description="该技能跨任务累积的经验记忆 (失败模式/纠正/注意事项), 可能为空"
+    )
     companion_files: List[str] = Field(default_factory=list)
     error: Optional[str] = None
 
@@ -240,5 +288,61 @@ class LoadSkillTool:
             name=skill.name,
             found=True,
             body=skill.body,
+            memory=read_skill_memory(skill),
             companion_files=[str(p) for p in skill.companion_files],
+        )
+
+
+# ---------------------------------------------------------------------------
+# append_skill_memory — built-in Tool to record a per-skill lesson
+# ---------------------------------------------------------------------------
+
+class AppendSkillMemoryInput(BaseModel):
+    skill_name: str = Field(..., description="要记录经验的技能 id")
+    note: str = Field(
+        ...,
+        description="一条经验/教训/注意事项 (如: 失败模式、输入格式坑、专家纠正)。简洁一句。",
+    )
+
+
+class AppendSkillMemoryOutput(BaseModel):
+    saved: bool
+    skill_name: str
+    error: Optional[str] = None
+
+
+class AppendSkillMemoryTool:
+    """Built-in Tool: append a lesson to a skill's memory.
+
+    Call when you learn something durable about a skill — a correction the
+    user gave, a failure mode, an input quirk — so future loads of that skill
+    surface the lesson. Do NOT record one-off task details."""
+
+    card = ToolCard(
+        name="append_skill_memory",
+        description=(
+            "给某个知识技能追加一条经验记忆 (失败模式/输入坑/用户纠正). "
+            "当你在使用某技能时学到可复用的教训时调用; 下次加载该技能会自动带出. "
+            "不要记一次性任务细节。"
+        ),
+        input_model=AppendSkillMemoryInput,
+        output_model=AppendSkillMemoryOutput,
+    )
+
+    def __init__(self, registry: SkillRegistry) -> None:
+        self._registry = registry
+
+    def run(self, **kwargs: Any) -> AppendSkillMemoryOutput:
+        inp = AppendSkillMemoryInput(**kwargs)
+        skill = self._registry.get(inp.skill_name)
+        if skill is None:
+            avail = ", ".join(self._registry.names) or "(无)"
+            return AppendSkillMemoryOutput(
+                saved=False, skill_name=inp.skill_name,
+                error=f"未找到技能 '{inp.skill_name}'. 可用: {avail}",
+            )
+        ok = append_skill_memory(skill, inp.note)
+        return AppendSkillMemoryOutput(
+            saved=ok, skill_name=inp.skill_name,
+            error=None if ok else "记忆文件不可写 (可能是只读的全局技能目录)",
         )
