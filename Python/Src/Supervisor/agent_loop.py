@@ -278,6 +278,110 @@ class AgentLoop:
             "usage": usage,
         }
 
+    async def run_stream(
+        self,
+        *,
+        system_prompt: str,
+        history: List[Dict[str, Any]],
+        user_input: str,
+        tools: List[Tool],
+        dispatch: ToolDispatch,
+    ):
+        """Streaming variant of :meth:`run` — an async generator of events so
+        the UI can show the workflow live.
+
+        Event shapes (all dicts with a ``type``):
+          * ``{"type":"text","delta":str}``         — assistant text chunk
+          * ``{"type":"tool_call","name","args"}``   — a tool is about to run
+          * ``{"type":"tool_result","name","ok"}``   — that tool finished
+          * ``{"type":"final","answer","tool_calls"}`` — turn complete
+        """
+        messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+        messages.extend(history)
+        messages.append({"role": "user", "content": user_input})
+
+        tool_schemas = [tool_to_openai_schema(t) for t in tools] or None
+        tool_calls_made: List[Dict[str, Any]] = []
+        last_input_tokens = 0
+        answer = ""
+
+        for _ in range(MAX_TOOL_ITERATIONS):
+            self._compress_in_turn(messages, last_input_tokens)
+
+            stream = await self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                tools=tool_schemas,
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+
+            text_parts: List[str] = []
+            tc_acc: Dict[int, Dict[str, str]] = {}
+            async for chunk in stream:
+                if getattr(chunk, "usage", None):
+                    last_input_tokens = getattr(chunk.usage, "prompt_tokens", 0) or last_input_tokens
+                if not getattr(chunk, "choices", None):
+                    continue
+                delta = chunk.choices[0].delta
+                if delta is None:
+                    continue
+                if getattr(delta, "content", None):
+                    text_parts.append(delta.content)
+                    yield {"type": "text", "delta": delta.content}
+                for tc in (getattr(delta, "tool_calls", None) or []):
+                    e = tc_acc.get(tc.index)
+                    fn = getattr(tc, "function", None)
+                    if e is None:
+                        tc_acc[tc.index] = {
+                            "id": tc.id or "",
+                            "name": (fn.name if fn else "") or "",
+                            "arguments": (fn.arguments if fn else "") or "",
+                        }
+                    else:
+                        if fn and fn.arguments:
+                            e["arguments"] += fn.arguments
+                        if fn and fn.name and not e["name"]:
+                            e["name"] = fn.name
+                        if tc.id and not e["id"]:
+                            e["id"] = tc.id
+
+            content = "".join(text_parts)
+            tool_calls = [tc_acc[i] for i in sorted(tc_acc)]
+
+            assistant: Dict[str, Any] = {"role": "assistant", "content": content or ""}
+            if tool_calls:
+                assistant["tool_calls"] = [
+                    {"id": t["id"], "type": "function",
+                     "function": {"name": t["name"], "arguments": t["arguments"] or "{}"}}
+                    for t in tool_calls
+                ]
+            messages.append(assistant)
+
+            if not tool_calls:
+                answer = content
+                break
+
+            for t in tool_calls:
+                name = t["name"]
+                try:
+                    args = json.loads(t["arguments"] or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                tool_calls_made.append({"name": name, "args": args})
+                yield {"type": "tool_call", "name": name, "args": args}
+                raw = await dispatch(name, args)
+                result = persist_large_result(name, truncate_result(raw))
+                ok = not (raw.startswith("Tool error") or raw.startswith("Unknown tool"))
+                yield {"type": "tool_result", "name": name, "ok": ok}
+                messages.append({"role": "tool", "tool_call_id": t["id"], "content": result})
+        else:
+            answer = answer or "(已达到最大工具调用轮数, 停止以避免死循环)"
+
+        yield {"type": "final", "answer": answer, "tool_calls": tool_calls_made}
+
     @staticmethod
     def _assistant_to_dict(msg: Any) -> Dict[str, Any]:
         """Serialise an assistant message (with any tool_calls) back into a

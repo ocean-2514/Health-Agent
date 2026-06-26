@@ -38,6 +38,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 import openai
 from pydantic import BaseModel
+from datetime import datetime
 
 project_root = str(Path(__file__).resolve().parents[3])
 if project_root not in sys.path:
@@ -175,6 +176,9 @@ class Supervisor:
         self._tools: "OrderedDict[str, Tool]" = OrderedDict()
         self._disabled: Set[str] = set()
         self.register_tools(tools)
+        # Tools present at construction (declared in tools.yaml) are built-in
+        # and protected from removal — they are core platform capabilities.
+        self._builtin: Set[str] = set(self._tools.keys())
 
         # Per-session memory-recall state (Supervisor is shared across
         # sessions, so keep surfaced/budget keyed by session id).
@@ -190,7 +194,13 @@ class Supervisor:
     def register_tools(self, tools: Iterable[Tool]) -> List[str]:
         return [self._add_one(t) for t in tools]
 
+    def is_builtin(self, name: str) -> bool:
+        """Built-in tools (declared in tools.yaml) are protected from removal."""
+        return name in self._builtin
+
     def unregister_tool(self, name: str) -> bool:
+        if name in self._builtin:
+            return False  # protected; callers should check is_builtin first
         present = name in self._tools
         self._tools.pop(name, None)
         self._disabled.discard(name)
@@ -368,6 +378,42 @@ class Supervisor:
         self._store.save_message(session_id, "assistant", answer)
         return {"answer": answer, "tool_calls": tool_calls}
 
+    async def chat_stream(self, session_id: str, user_input: str):
+        """Streaming chat turn — async generator of events for SSE.
+
+        Same pipeline as :meth:`_achat` (compact → recall → loop) but yields
+        the loop's events live, then persists the final answer. Errors are
+        emitted as an ``{"type":"error"}`` event, never raised into the
+        SSE stream."""
+        try:
+            history = await self._maybe_compact_and_load(session_id)
+            recalled = await self._recall_memories(session_id, user_input)
+            if recalled:
+                history = history + [
+                    {"role": "user", "content": format_memories_for_injection(recalled)}
+                ]
+            active = self._active_tools()
+            by_name = {t.card.name: t for t in active}
+            dispatch = make_dispatch(by_name)
+
+            final_answer = ""
+            async for ev in self._loop.run_stream(
+                system_prompt=self._build_prompt(),
+                history=history,
+                user_input=user_input,
+                tools=active,
+                dispatch=dispatch,
+            ):
+                if ev.get("type") == "final":
+                    final_answer = ev.get("answer", "")
+                yield ev
+        except Exception as e:  # noqa: BLE001
+            yield {"type": "error", "message": str(e)}
+            final_answer = f"[supervisor 内部错误] {e}"
+
+        self._store.save_message(session_id, "user", user_input)
+        self._store.save_message(session_id, "assistant", final_answer or "(模型未返回有效内容)")
+
     def new_session(self) -> str:
         return self._store.create_session()
 
@@ -392,7 +438,12 @@ class Supervisor:
     @property
     def tool_catalogue(self) -> List[Dict[str, Any]]:
         return [
-            {"name": n, "description": t.card.description, "disabled": n in self._disabled}
+            {
+                "name": n,
+                "description": t.card.description,
+                "disabled": n in self._disabled,
+                "builtin": n in self._builtin,
+            }
             for n, t in self._tools.items()
         ]
 
@@ -453,7 +504,12 @@ class Supervisor:
                 "若在使用某技能时学到可复用教训, 用 append_skill_memory 记下)\n" + catalogue
             )
         prompt += "\n\n" + build_memory_prompt_section()
+        prompt += "\n 当前时间：" + self._get_time() 
         return prompt
+    
+    def _get_time(self) -> str:
+        current_date = datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")
+        return current_date
 
     async def _side_query(self, system: str, user: str) -> str:
         return await self._loop.side_query(system, user)

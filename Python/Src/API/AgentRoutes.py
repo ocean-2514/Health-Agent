@@ -19,11 +19,14 @@ if the agent stack or Ollama is unavailable).
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 project_root = str(Path(__file__).resolve().parents[3])
@@ -109,6 +112,36 @@ def chat(req: ChatReq):
         session_id=session_id,
         answer=result["answer"],
         tool_calls=result.get("tool_calls", []),
+    )
+
+
+@router.post("/chat/stream")
+async def chat_stream(req: ChatReq):
+    """Streaming chat (SSE). Emits events: session, text, tool_call,
+    tool_result, final, error — so the UI can show the workflow live."""
+    if not req.message or not req.message.strip():
+        raise HTTPException(status_code=400, detail="message 不能为空")
+    # Build the supervisor in a worker thread: first build may probe remote
+    # A2A cards (asyncio.run), which must not run inside this event loop.
+    sup = await asyncio.to_thread(_get_supervisor)
+    session_id = req.session_id or sup.new_session()
+
+    def _sse(d: Dict[str, Any]) -> str:
+        return f"data: {json.dumps(d, ensure_ascii=False)}\n\n"
+
+    async def gen():
+        yield _sse({"type": "session", "session_id": session_id})
+        try:
+            async for ev in sup.chat_stream(session_id, req.message.strip()):
+                yield _sse(ev)
+        except Exception as e:  # noqa: BLE001
+            yield _sse({"type": "error", "message": str(e)})
+        yield _sse({"type": "end"})
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
@@ -224,6 +257,8 @@ def disable_tool(name: str):
 @router.delete("/tools/{name}")
 def remove_tool(name: str):
     sup = _get_supervisor()
+    if sup.is_builtin(name):
+        raise HTTPException(status_code=400, detail=f"内置工具不可移除: {name}")
     removed = sup.unregister_tool(name)
     if not removed:
         raise HTTPException(status_code=404, detail=f"工具不存在: {name}")

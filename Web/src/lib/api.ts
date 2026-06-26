@@ -80,7 +80,7 @@ export type AgentChatResp = {
     tool_calls: ToolCall[];
 };
 
-export type CatalogueItem = { name: string; description: string; disabled?: boolean };
+export type CatalogueItem = { name: string; description: string; disabled?: boolean; builtin?: boolean };
 
 export type AgentCatalogue = { tools: CatalogueItem[]; skills: CatalogueItem[] };
 
@@ -100,6 +100,59 @@ export const agentChat = async (
         throw new Error(detail?.detail || `请求失败 (${response.status})`);
     }
     return response.json();
+};
+
+// ---- streaming chat (SSE over fetch) ----
+
+export type AgentStreamEvent =
+    | { type: "session"; session_id: string }
+    | { type: "text"; delta: string }
+    | { type: "tool_call"; name: string; args: Record<string, any> }
+    | { type: "tool_result"; name: string; ok: boolean }
+    | { type: "final"; answer: string; tool_calls: ToolCall[] }
+    | { type: "error"; message: string }
+    | { type: "end" };
+
+/** Stream one chat turn. Calls `onEvent` for each SSE event. Returns when the
+ * stream ends. EventSource only supports GET, so we POST + parse the body. */
+export const agentChatStream = async (
+    message: string,
+    sessionId: string | undefined,
+    onEvent: (ev: AgentStreamEvent) => void,
+    signal?: AbortSignal,
+): Promise<void> => {
+    const resp = await fetch(`${API_BASE}/api/agent/chat/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, session_id: sessionId ?? null }),
+        signal,
+    });
+    if (!resp.ok || !resp.body) {
+        const detail = await resp.json().catch(() => ({}));
+        throw new Error(detail?.detail || `请求失败 (${resp.status})`);
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buf.indexOf("\n\n")) >= 0) {
+            const frame = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            const line = frame.split("\n").find((l) => l.startsWith("data:"));
+            if (!line) continue;
+            const json = line.slice(5).trim();
+            if (!json) continue;
+            try {
+                onEvent(JSON.parse(json) as AgentStreamEvent);
+            } catch {
+                /* ignore malformed frame */
+            }
+        }
+    }
 };
 
 export const agentNewSession = async (): Promise<string> => {
@@ -128,6 +181,7 @@ export type SessionInfo = {
     created_at: string;
     last_active: string;
     message_count: number;
+    title?: string;
 };
 
 export const agentSessions = async (limit = 30): Promise<SessionInfo[]> => {

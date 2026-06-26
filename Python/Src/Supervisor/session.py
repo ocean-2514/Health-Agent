@@ -199,14 +199,18 @@ class SessionStore:
     def list_sessions(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Recent sessions, newest first.
 
-        Returns ``[{session_id, created_at, last_active, message_count}, ...]``
-        with timestamps formatted as ``YYYY-MM-DD HH:MM:SS`` for display.
+        Each entry also carries a ``title`` — the first user message
+        (truncated) — so the UI can show a human-friendly label instead of
+        the raw id. Timestamps formatted ``YYYY-MM-DD HH:MM:SS``.
         """
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
-                "SELECT session_id, created_at, last_active, message_count "
-                "FROM sessions ORDER BY last_active DESC LIMIT ?",
+                "SELECT s.session_id, s.created_at, s.last_active, s.message_count, "
+                "  (SELECT m.content FROM messages m "
+                "   WHERE m.session_id = s.session_id AND m.role = 'user' "
+                "   ORDER BY m.id ASC LIMIT 1) AS first_user "
+                "FROM sessions s ORDER BY s.last_active DESC LIMIT ?",
                 (limit,),
             )
             rows = cursor.fetchall()
@@ -216,12 +220,17 @@ class SessionStore:
                 return ""
             return datetime.fromtimestamp(ts_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
 
+        def _title(first_user: Optional[str]) -> str:
+            t = (first_user or "").strip().replace("\n", " ")
+            return (t[:30] + "…") if len(t) > 30 else t
+
         return [
             {
                 "session_id": r["session_id"],
                 "created_at": _fmt(r["created_at"]),
                 "last_active": _fmt(r["last_active"]),
                 "message_count": r["message_count"],
+                "title": _title(r["first_user"]),
             }
             for r in rows
         ]
