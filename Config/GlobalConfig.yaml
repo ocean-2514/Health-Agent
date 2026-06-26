@@ -23,7 +23,7 @@ LLM:
   # 缺省/留空时回退到上面的 Local 配置 (BaseURL 自动补 /v1)。
   Agent:
     BaseURL: "https://api.deepseek.com/v1"   # DeepSeek 官方 OpenAI 兼容端点
-    APIKey: "sk-b9d54f1f06eb451996f6d9d376d03669"           # 填入 deepseek 的 key
+    APIKey: "***********************"           # 填入 deepseek 的 key
     ModelName: "deepseek-v4-pro"
     Temperature: 0.1
     MaxTokens: 4096                            # 单次回复上限 (诊断报告由工具产出, 这里够用)
