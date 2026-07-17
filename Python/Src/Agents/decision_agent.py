@@ -67,6 +67,9 @@ def _build_rul_input(state: DiagnosisState) -> RULInput:
         moisture=p.get("moisture"),
         penalty_factor=p.get("penalty_factor"),
         defect_info=defect_info,
+        # DL/T 1685 原始状态量测量 (可选); 提供时启用标准扣分制评价驱动 HI/RUL。
+        dlt_measurements=p.get("dlt_measurements"),
+        voltage_kv=p.get("voltage_kv", 220.0),
     )
 
 

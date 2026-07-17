@@ -1,9 +1,11 @@
 import React from 'react';
 
+type TabId = 'fleet' | 'reasoning' | 'approval' | 'dlt' | 'agent';
+
 type LayoutProps = {
     children: React.ReactNode;
-    activeTab: 'fleet' | 'reasoning' | 'approval' | 'agent';
-    setActiveTab: (tab: 'fleet' | 'reasoning' | 'approval' | 'agent') => void;
+    activeTab: TabId;
+    setActiveTab: (tab: TabId) => void;
 };
 
 export default function Layout({ children, activeTab, setActiveTab }: LayoutProps) {
@@ -22,7 +24,7 @@ export default function Layout({ children, activeTab, setActiveTab }: LayoutProp
                             </svg>
                         </div>
                         <h1 className="text-xl font-bold tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-cyan-300 to-blue-500">
-                            主设备全寿命周期管控智能体助手
+                            设备全寿命周期管控智能体
                         </h1>
                     </div>
 
@@ -44,6 +46,12 @@ export default function Layout({ children, activeTab, setActiveTab }: LayoutProp
                             onClick={() => setActiveTab('approval')}
                         >
                             专家复核
+                        </TabButton>
+                        <TabButton
+                            active={activeTab === 'dlt'}
+                            onClick={() => setActiveTab('dlt')}
+                        >
+                            标准评价
                         </TabButton>
                         <TabButton
                             active={activeTab === 'agent'}

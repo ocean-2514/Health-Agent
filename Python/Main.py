@@ -11,6 +11,7 @@ if project_root not in sys.path:
 
 from Python.Src.API.Routes import router
 from Python.Src.API.AgentRoutes import router as agent_router
+from Python.Src.API.DltRoutes import router as dlt_router
 from Python.Src.Middleware.GlobalConfig import GlobalConfig
 from fastapi.staticfiles import StaticFiles
 
@@ -30,6 +31,7 @@ app.mount("/mock", StaticFiles(directory=str(mock_dir)), name="mock")
 
 app.include_router(router)
 app.include_router(agent_router)
+app.include_router(dlt_router)
 
 if __name__ == "__main__":
     server_config = GlobalConfig.config.get("Server", {})

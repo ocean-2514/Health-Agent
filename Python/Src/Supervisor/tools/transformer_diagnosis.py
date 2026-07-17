@@ -63,7 +63,13 @@ class TransformerDiagnosisOutput(BaseModel):
     dga_risk_score: Optional[float] = Field(None, description="DGA 综合风险评分 0-100")
     primary_threat: Optional[str] = Field(None, description="主要威胁类型")
     forced_override: Optional[str] = Field(
-        None, description="若严重缺陷强制覆盖了 RUL/HI, 这里说明原因"
+        None, description="若严重缺陷/标准状态强制调整了 RUL/HI, 这里说明原因"
+    )
+    overall_state: Optional[str] = Field(
+        None, description="DL/T 1685 整体状态 (正常/注意/异常/严重); 未做标准评价时为 None"
+    )
+    dlt_evaluation: Optional[Dict[str, Any]] = Field(
+        None, description="DL/T 1685 评价明细 (各部件状态/扣分)"
     )
     final_report: str = Field(..., description="人类可读的完整诊断报告 (markdown)")
     extra_artifacts: Dict[str, Any] = Field(
@@ -131,6 +137,8 @@ class TransformerDiagnosisTool:
             dga_risk_score=float(dga.overall_risk_score) if dga else None,
             primary_threat=dga.primary_threat if dga else None,
             forced_override=rul.forced_override if rul else None,
+            overall_state=rul.overall_state if rul else None,
+            dlt_evaluation=rul.dlt_evaluation if rul else None,
             final_report=state.final_report or "(报告生成失败)",
             extra_artifacts=extra,
         )

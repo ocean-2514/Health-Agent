@@ -243,3 +243,115 @@ export const agentRemoveTool = async (name: string): Promise<MutationResult> => 
     }
     return response.json();
 };
+
+// ===========================================================================
+// DL/T 1685-2017 standard state-evaluation ("标准评价" page)
+// ===========================================================================
+
+export type DltItem = {
+    key: string;
+    name: string;
+    group?: string | null;
+    input: 'numeric' | 'qualitative';
+    levels: string[];
+    hint: string;
+};
+
+export type DltComponent = { component: string; items: DltItem[] };
+
+export type DltCatalogue = {
+    components: DltComponent[];
+    levels_all: string[];
+    voltage_options: number[];
+};
+
+export type DltComponentResult = {
+    state: string;
+    total_deduction: number;
+    max_single: number;
+    items: { item: string; level: string; deduction: number; basis: string }[];
+};
+
+export type DltEvalResult = {
+    overall_state: string;
+    total_deduction: number;
+    health_index: number;
+    components: Record<string, DltComponentResult>;
+};
+
+export type DltMeasurements = Record<string, string | number>;
+
+export const dltCatalogue = async (): Promise<DltCatalogue> => {
+    const r = await fetch(`${API_BASE}/api/dlt1685/catalogue`);
+    if (!r.ok) throw new Error(`加载状态量目录失败 (${r.status})`);
+    return r.json();
+};
+
+export const dltEvaluate = async (
+    measurements: DltMeasurements,
+    voltageKv: number,
+): Promise<DltEvalResult> => {
+    const r = await fetch(`${API_BASE}/api/dlt1685/evaluate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ measurements, voltage_kv: voltageKv }),
+    });
+    if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d?.detail || `评价失败 (${r.status})`);
+    }
+    return r.json();
+};
+
+export type DltImportResult = {
+    equipment_id: string;
+    measurements: DltMeasurements;
+    imported: { key: string; name: string; value: number; sensor: string }[];
+};
+
+export const dltIotdbImport = async (
+    equipmentId: string,
+    substation = 'station1',
+): Promise<DltImportResult> => {
+    const r = await fetch(
+        `${API_BASE}/api/dlt1685/iotdb_import?equipment_id=${encodeURIComponent(equipmentId)}&substation=${encodeURIComponent(substation)}`,
+    );
+    if (!r.ok) throw new Error(`IoTDB 导入失败 (${r.status})`);
+    return r.json();
+};
+
+export type DltDiagnoseResult = {
+    health_index: number;
+    predicted_rul_years: number;
+    fusion_verdict_cn: string;
+    fusion_confidence: number;
+    dga_risk_score?: number | null;
+    primary_threat?: string | null;
+    forced_override?: string | null;
+    overall_state?: string | null;
+    dlt_evaluation?: DltEvalResult | null;
+    final_report: string;
+};
+
+export const dltDiagnose = async (
+    equipmentId: string,
+    measurements: DltMeasurements,
+    voltageKv: number,
+    substation = 'station1',
+): Promise<DltDiagnoseResult> => {
+    const r = await fetch(`${API_BASE}/api/dlt1685/diagnose`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            equipment_id: equipmentId,
+            substation,
+            measurements,
+            voltage_kv: voltageKv,
+        }),
+    });
+    if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d?.detail || `诊断失败 (${r.status})`);
+    }
+    return r.json();
+};

@@ -69,6 +69,12 @@ class RULInput(BaseModel):
         None, ge=0.5, le=1.0, description="风险系数 0.5-1.0; None 时默认 1.0"
     )
     defect_info: Optional[DefectInfo] = None
+    # DL/T 1685-2017 原始状态量测量 (key→原始实测值/劣化程度)。提供时启用标准
+    # 扣分制状态评价, 由整体状态驱动 HI/风险系数; 缺省则沿用原有评分路径。
+    dlt_measurements: Optional[Dict[str, Any]] = Field(
+        None, description="DL/T 1685 状态量测量; 见 Core.rules_dlt1685 的 key"
+    )
+    voltage_kv: float = Field(220.0, description="电压等级 kV (影响 DL/T 阈值分档)")
 
 
 class RULResult(BaseModel):
@@ -82,7 +88,13 @@ class RULResult(BaseModel):
     )
     applied_penalty_factor: float = Field(..., description="实际生效的风险系数")
     forced_override: Optional[str] = Field(
-        None, description="若因严重缺陷强制覆盖了 RUL/HI, 这里说明触发原因"
+        None, description="若因严重缺陷/标准状态强制调整了 RUL/HI, 这里说明触发原因"
+    )
+    overall_state: Optional[str] = Field(
+        None, description="DL/T 1685 整体状态 (正常/注意/异常/严重); 未做标准评价时为 None"
+    )
+    dlt_evaluation: Optional[Dict[str, Any]] = Field(
+        None, description="DL/T 1685 评价明细 (各部件状态/扣分); 未做标准评价时为 None"
     )
 
 
@@ -90,13 +102,20 @@ class RULResult(BaseModel):
 # Public API
 # ---------------------------------------------------------------------------
 
+# DL/T 1685 整体状态 → 风险系数(加速老化系数)。**工程外延, 非标准定义**:
+# 状态越差, 老化越快, RUL 越短。
+_STATE_PENALTY = {"正常": 1.0, "注意": 0.9, "异常": 0.75, "严重": 0.5}
+
+
 def compute_rul(input_data: RULInput) -> RULResult:
     """Compute health index and remaining useful life via the physics model.
 
-    Defect-driven adjustments (preserved from legacy):
-      - 起火 + confidence > 0.6 → forced RUL = 0.0, forced HI = 10.0
-      - 漏油 + confidence > 0.5 → penalty = min(penalty, 0.7)
-      - 异常 + confidence > 0.5 → penalty = min(penalty, 0.8)
+    评分/寿命调整来源(按“更严重优先”合并):
+      1. **DL/T 1685-2017 状态评价**(当提供 ``dlt_measurements`` 时): 扣分制得出整体
+         状态, HI 用 ``deduction_to_hi``, 风险系数按状态下调(注意/异常/严重→0.9/0.75/0.5)。
+      2. **缺陷检测强制覆盖**(保留): 起火+置信>0.6 → RUL=0/HI=10; 漏油>0.5 → penalty≤0.7;
+         异常>0.5 → penalty≤0.8。
+    未提供 ``dlt_measurements`` 且无缺陷覆盖时, HI 由物理模型按 oil/dga/furan 计算(原路径)。
     """
     moisture = input_data.moisture
     if moisture is None:
@@ -104,7 +123,9 @@ def compute_rul(input_data: RULInput) -> RULResult:
         moisture = 1.2 if bdv == 1 else 2.2 if bdv == 2 else 3.5
 
     penalty = input_data.penalty_factor if input_data.penalty_factor is not None else 1.0
-    forced_note: Optional[str] = None
+    notes: list[str] = []
+    forced_hi: Optional[float] = None
+    forced_rul: Optional[float] = None
 
     physics_input: Dict[str, Any] = {
         "oil": input_data.oil.model_dump(),
@@ -116,21 +137,41 @@ def compute_rul(input_data: RULInput) -> RULResult:
         "penalty_factor": penalty,
     }
 
+    # 1) DL/T 1685-2017 标准状态评价 → 驱动 HI / 风险系数
+    dlt_eval: Optional[Dict[str, Any]] = None
+    overall_state: Optional[str] = None
+    if input_data.dlt_measurements:
+        from Python.Src.Core.dlt1685 import deduction_to_hi, evaluate
+        res = evaluate(input_data.dlt_measurements, input_data.voltage_kv)
+        overall_state = res.overall_state
+        dlt_eval = res.to_dict()
+        hi_state = deduction_to_hi(res)
+        forced_hi = hi_state
+        penalty = min(penalty, _STATE_PENALTY.get(overall_state, 1.0))
+        notes.append(
+            f"DL/T 1685 整体状态={overall_state}, HI={hi_state}, 风险系数={penalty}"
+        )
+
+    # 2) 缺陷检测强制覆盖(与标准结果按“更严重优先”合并)
     if input_data.defect_info is not None:
         cn = input_data.defect_info.final_result_cn
         conf = input_data.defect_info.final_confidence
         if "起火" in cn and conf > 0.6:
-            physics_input["forced_rul"] = 0.0
-            physics_input["forced_hi"] = 10.0
-            forced_note = f"检测到起火 (置信度 {conf:.2f})，强制 RUL=0 / HI=10"
+            forced_rul = 0.0
+            forced_hi = 10.0 if forced_hi is None else min(forced_hi, 10.0)
+            notes.append(f"检测到起火 (置信度 {conf:.2f})，强制 RUL=0 / HI≤10")
         elif "漏油" in cn and conf > 0.5:
             penalty = min(penalty, 0.7)
-            physics_input["penalty_factor"] = penalty
-            forced_note = f"检测到漏油，加速老化系数下调至 {penalty}"
+            notes.append(f"检测到漏油，加速老化系数下调至 {penalty}")
         elif "异常" in cn and conf > 0.5:
             penalty = min(penalty, 0.8)
-            physics_input["penalty_factor"] = penalty
-            forced_note = f"检测到异常，加速老化系数下调至 {penalty}"
+            notes.append(f"检测到异常，加速老化系数下调至 {penalty}")
+
+    physics_input["penalty_factor"] = penalty
+    if forced_hi is not None:
+        physics_input["forced_hi"] = forced_hi
+    if forced_rul is not None:
+        physics_input["forced_rul"] = forced_rul
 
     raw = TransformerRULCalculator().run_full_analysis(physics_input)
 
@@ -140,7 +181,9 @@ def compute_rul(input_data: RULInput) -> RULResult:
         health_deduction_curve=raw.get("health_deduction_curve"),
         uncertainty_analysis=raw.get("uncertainty_analysis"),
         applied_penalty_factor=float(raw.get("ai_penalty_factor_applied", penalty)),
-        forced_override=forced_note,
+        forced_override="; ".join(notes) if notes else None,
+        overall_state=overall_state,
+        dlt_evaluation=dlt_eval,
     )
 
 

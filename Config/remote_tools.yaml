@@ -14,16 +14,16 @@
 #     python -m a2a_demo_server.fake_search_server
 # from the repo root) — returns canned defect knowledge.
 
-remote_tools:
-  - name: defect_kb_search
-    description: >-
-      Look up transformer defect knowledge entries by symptom keywords
-      (DGA gas patterns, vibration signatures, partial discharge bands,
-      过热/局放/接地 等). Use when the user asks for evidence,
-      precedent cases, or standards references for a specific defect or
-      symptom — NOT for running a fresh transformer diagnosis (use
-      transformer_diagnosis for that).
-    url: http://127.0.0.1:9001
-    timeout_s: 30
-    enabled: true
-    probe: true
+# remote_tools:
+#   - name: defect_kb_search
+#     description: >-
+#       Look up transformer defect knowledge entries by symptom keywords
+#       (DGA gas patterns, vibration signatures, partial discharge bands,
+#       过热/局放/接地 等). Use when the user asks for evidence,
+#       precedent cases, or standards references for a specific defect or
+#       symptom — NOT for running a fresh transformer diagnosis (use
+#       transformer_diagnosis for that).
+#     url: http://127.0.0.1:9001
+#     timeout_s: 30
+#     enabled: true
+#     probe: true
