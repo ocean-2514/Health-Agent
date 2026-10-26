@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import AIChat from '../components/AIChat';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/Card';
@@ -9,8 +9,12 @@ export default function ReasoningHub({ deviceId }: { deviceId?: string }) {
     const [data, setData] = useState<any>(null);
     const [defectData, setDefectData] = useState<any>(null);
     const [loading, setLoading] = useState(true);
+    const requestRef = useRef<boolean>(false);
 
     useEffect(() => {
+        if (requestRef.current) return;
+        requestRef.current = true;
+        
         setLoading(true);
         Promise.all([
             assessHealth({ id: deviceId }),

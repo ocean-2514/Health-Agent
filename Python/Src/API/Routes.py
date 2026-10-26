@@ -1,6 +1,12 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
+import sys
+from pathlib import Path
+
+project_root = str(Path(__file__).resolve().parent.parent.parent.parent)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from Python.Src.Services.AssessmentService import AssessmentService
 
@@ -57,3 +63,25 @@ async def assess_health(req: HealthInput):
 @router.get("/api/health")
 async def ping():
     return {"status": "ok", "message": "ElectricityHealthAgent is running."}
+
+@router.get("/")
+async def root():
+    """API 根路径，返回API信息"""
+    return {
+        "service": "Electricity Health Agent",
+        "version": "1.0.0",
+        "status": "running",
+        "documentation": {
+            "swagger": "/docs",
+            "redoc": "/redoc"
+        },
+        "available_endpoints": [
+            {"path": "/api/health", "method": "GET", "description": "健康检查"},
+            {"path": "/api/assess/defect", "method": "POST", "description": "缺陷识别"},
+            {"path": "/api/assess/health", "method": "POST", "description": "健康评估"}
+        ]
+    }
+
+if __name__ == "__main__":
+    req = HealthInput()
+    print(req.dict())

@@ -2,6 +2,8 @@
 
 const isMock = false; // Set to false to connect to the real Python backend at localhost:8000
 
+export const API_BASE = "http://localhost:8000";
+
 export const assessHealth = async (data: any) => {
     if (isMock) {
         // Return a mocked response closely resembling what the engine would produce
@@ -65,3 +67,291 @@ export const assessDefect = async (data: any) => {
     });
     return response.json();
 }
+
+// ===========================================================================
+// Multi-agent platform (Supervisor) — the refactored Tool/Skill/Agent stack
+// ===========================================================================
+
+export type ToolCall = { name: string; args: Record<string, any> };
+
+export type AgentChatResp = {
+    session_id: string;
+    answer: string;
+    tool_calls: ToolCall[];
+};
+
+export type CatalogueItem = { name: string; description: string; disabled?: boolean; builtin?: boolean };
+
+export type AgentCatalogue = { tools: CatalogueItem[]; skills: CatalogueItem[] };
+
+/** One chat turn. Pass `session_id` to continue a conversation; omit it to
+ * start a new one (the returned `session_id` is the created/used id). */
+export const agentChat = async (
+    message: string,
+    sessionId?: string
+): Promise<AgentChatResp> => {
+    const response = await fetch(`${API_BASE}/api/agent/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, session_id: sessionId ?? null }),
+    });
+    if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        throw new Error(detail?.detail || `请求失败 (${response.status})`);
+    }
+    return response.json();
+};
+
+// ---- streaming chat (SSE over fetch) ----
+
+export type AgentStreamEvent =
+    | { type: "session"; session_id: string }
+    | { type: "text"; delta: string }
+    | { type: "tool_call"; name: string; args: Record<string, any> }
+    | { type: "tool_result"; name: string; ok: boolean }
+    | { type: "final"; answer: string; tool_calls: ToolCall[] }
+    | { type: "error"; message: string }
+    | { type: "end" };
+
+/** Stream one chat turn. Calls `onEvent` for each SSE event. Returns when the
+ * stream ends. EventSource only supports GET, so we POST + parse the body. */
+export const agentChatStream = async (
+    message: string,
+    sessionId: string | undefined,
+    onEvent: (ev: AgentStreamEvent) => void,
+    signal?: AbortSignal,
+): Promise<void> => {
+    const resp = await fetch(`${API_BASE}/api/agent/chat/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, session_id: sessionId ?? null }),
+        signal,
+    });
+    if (!resp.ok || !resp.body) {
+        const detail = await resp.json().catch(() => ({}));
+        throw new Error(detail?.detail || `请求失败 (${resp.status})`);
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buf.indexOf("\n\n")) >= 0) {
+            const frame = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            const line = frame.split("\n").find((l) => l.startsWith("data:"));
+            if (!line) continue;
+            const json = line.slice(5).trim();
+            if (!json) continue;
+            try {
+                onEvent(JSON.parse(json) as AgentStreamEvent);
+            } catch {
+                /* ignore malformed frame */
+            }
+        }
+    }
+};
+
+export const agentNewSession = async (): Promise<string> => {
+    const response = await fetch(`${API_BASE}/api/agent/session`, { method: "POST" });
+    const data = await response.json();
+    return data.session_id;
+};
+
+export const agentHistory = async (
+    sessionId: string
+): Promise<{ role: string; content: string }[]> => {
+    const response = await fetch(`${API_BASE}/api/agent/session/${sessionId}/history`);
+    if (!response.ok) return [];
+    const data = await response.json();
+    return data.messages ?? [];
+};
+
+export const agentCatalogue = async (): Promise<AgentCatalogue> => {
+    const response = await fetch(`${API_BASE}/api/agent/catalogue`);
+    if (!response.ok) return { tools: [], skills: [] };
+    return response.json();
+};
+
+export type SessionInfo = {
+    session_id: string;
+    created_at: string;
+    last_active: string;
+    message_count: number;
+    title?: string;
+};
+
+export const agentSessions = async (limit = 30): Promise<SessionInfo[]> => {
+    const response = await fetch(`${API_BASE}/api/agent/sessions?limit=${limit}`);
+    if (!response.ok) return [];
+    const data = await response.json();
+    return data.sessions ?? [];
+};
+
+export const agentDeleteSession = async (sessionId: string): Promise<void> => {
+    await fetch(`${API_BASE}/api/agent/session/${sessionId}`, { method: 'DELETE' });
+};
+
+// ---- hot-loading (mutates the live registry, returns fresh catalogue) ----
+
+/** Catalogue + optional mutation metadata (added names / registered name). */
+export type MutationResult = AgentCatalogue & {
+    added?: string[];
+    registered?: string;
+    changed?: boolean;
+};
+
+const postMutation = async (path: string, body?: any): Promise<MutationResult> => {
+    const response = await fetch(`${API_BASE}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        throw new Error(detail?.detail || `请求失败 (${response.status})`);
+    }
+    return response.json();
+};
+
+export const agentReloadSkills = (): Promise<MutationResult> =>
+    postMutation('/api/agent/reload_skills');
+
+export const agentRegisterRemote = (url: string, name?: string): Promise<MutationResult> =>
+    postMutation('/api/agent/tools/register_remote', { url, name: name ?? null });
+
+export const agentReloadRemote = (): Promise<MutationResult> =>
+    postMutation('/api/agent/tools/reload_remote');
+
+export const agentLoadDir = (path: string): Promise<MutationResult> =>
+    postMutation('/api/agent/tools/load_dir', { path });
+
+export const agentEnableTool = (name: string): Promise<MutationResult> =>
+    postMutation(`/api/agent/tools/${name}/enable`);
+
+export const agentDisableTool = (name: string): Promise<MutationResult> =>
+    postMutation(`/api/agent/tools/${name}/disable`);
+
+export const agentRemoveTool = async (name: string): Promise<MutationResult> => {
+    const response = await fetch(`${API_BASE}/api/agent/tools/${name}`, { method: 'DELETE' });
+    if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        throw new Error(detail?.detail || `请求失败 (${response.status})`);
+    }
+    return response.json();
+};
+
+// ===========================================================================
+// DL/T 1685-2017 standard state-evaluation ("标准评价" page)
+// ===========================================================================
+
+export type DltItem = {
+    key: string;
+    name: string;
+    group?: string | null;
+    input: 'numeric' | 'qualitative';
+    levels: string[];
+    hint: string;
+};
+
+export type DltComponent = { component: string; items: DltItem[] };
+
+export type DltCatalogue = {
+    components: DltComponent[];
+    levels_all: string[];
+    voltage_options: number[];
+};
+
+export type DltComponentResult = {
+    state: string;
+    total_deduction: number;
+    max_single: number;
+    items: { item: string; level: string; deduction: number; basis: string }[];
+};
+
+export type DltEvalResult = {
+    overall_state: string;
+    total_deduction: number;
+    health_index: number;
+    components: Record<string, DltComponentResult>;
+};
+
+export type DltMeasurements = Record<string, string | number>;
+
+export const dltCatalogue = async (): Promise<DltCatalogue> => {
+    const r = await fetch(`${API_BASE}/api/dlt1685/catalogue`);
+    if (!r.ok) throw new Error(`加载状态量目录失败 (${r.status})`);
+    return r.json();
+};
+
+export const dltEvaluate = async (
+    measurements: DltMeasurements,
+    voltageKv: number,
+): Promise<DltEvalResult> => {
+    const r = await fetch(`${API_BASE}/api/dlt1685/evaluate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ measurements, voltage_kv: voltageKv }),
+    });
+    if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d?.detail || `评价失败 (${r.status})`);
+    }
+    return r.json();
+};
+
+export type DltImportResult = {
+    equipment_id: string;
+    measurements: DltMeasurements;
+    imported: { key: string; name: string; value: number; sensor: string }[];
+};
+
+export const dltIotdbImport = async (
+    equipmentId: string,
+    substation = 'station1',
+): Promise<DltImportResult> => {
+    const r = await fetch(
+        `${API_BASE}/api/dlt1685/iotdb_import?equipment_id=${encodeURIComponent(equipmentId)}&substation=${encodeURIComponent(substation)}`,
+    );
+    if (!r.ok) throw new Error(`IoTDB 导入失败 (${r.status})`);
+    return r.json();
+};
+
+export type DltDiagnoseResult = {
+    health_index: number;
+    predicted_rul_years: number;
+    fusion_verdict_cn: string;
+    fusion_confidence: number;
+    dga_risk_score?: number | null;
+    primary_threat?: string | null;
+    forced_override?: string | null;
+    overall_state?: string | null;
+    dlt_evaluation?: DltEvalResult | null;
+    final_report: string;
+};
+
+export const dltDiagnose = async (
+    equipmentId: string,
+    measurements: DltMeasurements,
+    voltageKv: number,
+    substation = 'station1',
+): Promise<DltDiagnoseResult> => {
+    const r = await fetch(`${API_BASE}/api/dlt1685/diagnose`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            equipment_id: equipmentId,
+            substation,
+            measurements,
+            voltage_kv: voltageKv,
+        }),
+    });
+    if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d?.detail || `诊断失败 (${r.status})`);
+    }
+    return r.json();
+};

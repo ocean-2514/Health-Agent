@@ -1,0 +1,9 @@
+{
+  "health_index": 81.93,
+  "predicted_rul_years": 18.32,
+  "fusion_verdict_cn": "放电",
+  "fusion_confidence": 0.151,
+  "dga_risk_score": 99.0,
+  "primary_threat": "放电故障",
+  "forced_override": null
+}

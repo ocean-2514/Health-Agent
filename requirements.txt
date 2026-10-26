@@ -2,6 +2,7 @@
 langchain
 langchain-openai
 langchain_community
+langchain_ollama
 crewai
 crewai-tools
 
@@ -27,3 +28,13 @@ pydantic
 plotly
 pypdf
 pyyaml
+
+# MCP Server (Phase 2)
+fastmcp
+
+# Multi-Agent Orchestration (Phase 3)
+langgraph
+
+# Testing
+pytest
+pytest-asyncio

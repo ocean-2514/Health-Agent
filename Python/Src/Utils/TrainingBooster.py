@@ -16,6 +16,7 @@ try:
     from models.cnn_model import train_oil_cnn_model
     from models.yolo_model import train_transformer_defect_model
 except ImportError as e:
+    print(bysj_path)
     print(f"[TrainingBooster] Warning: Failed to import models from bysj: {e}")
 
 class TrainingBooster:

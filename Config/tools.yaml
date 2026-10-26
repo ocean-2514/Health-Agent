@@ -1,0 +1,20 @@
+# Tools the SupervisorAgent dispatches to (the LLM calls these directly).
+# Order is informational — the LLM picks which to call based on each tool's
+# `description` field. Set `enabled: false` to suppress without deleting.
+#
+# Adding a new tool = drop a class with `card` + `run`, then add an entry
+# here. No code change in supervisor / chat_cli.
+#
+# (Prompt-style *Skills* are a separate concept — SKILL.md files under
+#  `skills/`, surfaced via the built-in load_skill tool. Not declared here.)
+
+tools:
+  - name: transformer_diagnosis
+    class_path: Python.Src.Supervisor.tools.transformer_diagnosis.TransformerDiagnosisTool
+    enabled: true
+    init_kwargs: {}
+
+  - name: history_lookup
+    class_path: Python.Src.Supervisor.tools.history_lookup.HistoryLookupTool
+    enabled: true
+    init_kwargs: {}
