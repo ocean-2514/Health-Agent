@@ -2,62 +2,67 @@ import React, { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
-    Send, Bot, User, Wrench, BookOpen, Plus, Loader2, Cpu, Sparkles,
+    Send, Bot, User, Wrench, BookOpen, Plus, Loader2, Cpu,
     MessageSquare, Trash2, RefreshCw, Power, X, Cloud, FolderSearch,
-    Users, Brain, Activity, Clock, Check, CircleAlert,
+    ImagePlus, CircleAlert,
 } from 'lucide-react';
 import {
     agentChatStream, agentCatalogue, agentNewSession, agentSessions, agentHistory,
     agentDeleteSession, agentReloadSkills, agentRegisterRemote, agentReloadRemote,
     agentLoadDir, agentEnableTool, agentDisableTool, agentRemoveTool,
+    agentUploadImage,
     type CatalogueItem, type SessionInfo, type AgentCatalogue,
     type MutationResult,
+    type IntentInfo, type PlanStep, type EvidenceRecord, type GuardResult,
 } from '../lib/api';
+import { roleForTool, ROLE_META } from '../lib/agentMeta';
+import IntentBadge from '../components/agent/IntentBadge';
+import PlanPanel from '../components/agent/PlanPanel';
+import CollaborationGraph, { type TraceEntry } from '../components/agent/CollaborationGraph';
+import EvidenceCard from '../components/agent/EvidenceCard';
+import GuardCard from '../components/agent/GuardCard';
 
-type ToolStep = {
-    name: string;
-    label: string;
-    detail: string;
-    status: 'running' | 'done' | 'error';
-};
+// An image attached to a chat message. `url` is a same-origin URL the browser
+// can render; the edge path is kept only on the backend and never typed here.
+type ChatImage = { url: string; name: string };
 
 type ChatMsg = {
     role: 'user' | 'assistant';
     text: string;
-    toolSteps?: ToolStep[];
+    images?: ChatImage[];
     streaming?: boolean;
+    intent?: IntentInfo | null;
+    planSteps?: PlanStep[];
+    evidence?: EvidenceRecord[];
+    guard?: GuardResult | null;
+    trace?: TraceEntry[];
 };
 
-// Map a raw tool name + args to a user-friendly workflow line.
-function friendlyTool(name: string, args: Record<string, any>): { label: string; detail: string; icon: React.ReactNode } {
-    const a = args || {};
-    switch (name) {
-        case 'spawn_agent': {
-            const tasks = Array.isArray(a.tasks) ? a.tasks : [];
-            const kinds = tasks.map((t: any) => t?.type || 'general').join('、');
-            return { label: '派生子智能体', detail: `${tasks.length} 个子任务${kinds ? ` (${kinds})` : ''}`, icon: <Users className="w-3.5 h-3.5" /> };
-        }
-        case 'load_skill':
-            return { label: '加载知识技能', detail: a.name || '', icon: <BookOpen className="w-3.5 h-3.5" /> };
-        case 'append_skill_memory':
-            return { label: '记录技能经验', detail: a.skill_name || '', icon: <Brain className="w-3.5 h-3.5" /> };
-        case 'save_memory':
-            return { label: '写入跨会话记忆', detail: a.name || '', icon: <Brain className="w-3.5 h-3.5" /> };
-        case 'transformer_diagnosis':
-            return { label: '运行变压器诊断', detail: a.equipment_id || '', icon: <Activity className="w-3.5 h-3.5" /> };
-        case 'history_lookup':
-            return { label: '查询诊断历史', detail: a.equipment_id || '', icon: <Clock className="w-3.5 h-3.5" /> };
-        default:
-            return { label: `调用工具: ${name}`, detail: '', icon: <Wrench className="w-3.5 h-3.5" /> };
-    }
-}
+// A picked image before it is sent. It uploads immediately so the send path is
+// fast and upload errors surface early.
+type Attachment = {
+    id: string;
+    name: string;
+    previewUrl: string;
+    status: 'uploading' | 'done' | 'error';
+    serverPath?: string;
+    serverUrl?: string;
+    error?: string;
+};
 
 const WELCOME: ChatMsg = {
     role: 'assistant',
     text:
-        '您好，我是变压器健康管控多智能体平台。可以让我对设备做诊断/体检、查历史趋势，' +
-        '或问 DGA 判读、检修建议等问题——我会按需调用工具、领域知识与子智能体。试试：「给 tr01 做一次体检」。',
+        '您好，我是变压器健康智能助手。可以请我对设备做体检诊断、查看历史趋势，' +
+        '或咨询油色谱判读、检修建议等问题；回答会附上依据来源与校核结果，便于核对。',
 };
+
+const sanitizeDisplay = (text = '') =>
+    text
+        .replace(/预测剩余寿命（RUL）/g, '预测剩余寿命')
+        .replace(/健康指数（HI）/g, '健康指数')
+        .replace(/\bRUL\b/g, '剩余寿命')
+        .replace(/\bHI\b/g, '健康指数');
 
 export default function AgentConsole() {
     const [messages, setMessages] = useState<ChatMsg[]>([WELCOME]);
@@ -68,7 +73,9 @@ export default function AgentConsole() {
     const [tools, setTools] = useState<CatalogueItem[]>([]);
     const [skills, setSkills] = useState<CatalogueItem[]>([]);
     const [notReady, setNotReady] = useState(false);
+    const [attachments, setAttachments] = useState<Attachment[]>([]);
     const scrollRef = useRef<HTMLDivElement>(null);
+    const fileRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {
         scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
@@ -108,7 +115,7 @@ export default function AgentConsole() {
         setMessages(rows.length ? historyToMessages(rows) : [WELCOME]);
     };
 
-    // Patch the last (streaming assistant) message.
+    // Patch the last (streaming assistant) message with a plain merge.
     const patchLast = (patch: Partial<ChatMsg>) =>
         setMessages((prev) => {
             if (prev.length === 0) return prev;
@@ -117,50 +124,180 @@ export default function AgentConsole() {
             return copy;
         });
 
+    // Patch the last message with a pure updater (used for nested arrays: steps / trace).
+    const patchLastMsg = (fn: (msg: ChatMsg) => ChatMsg) =>
+        setMessages((prev) => {
+            if (prev.length === 0) return prev;
+            const copy = [...prev];
+            copy[copy.length - 1] = fn(copy[copy.length - 1]);
+            return copy;
+        });
+
+    const makeId = () =>
+        (crypto as Crypto & { randomUUID?: () => string })?.randomUUID?.() ??
+        `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+    // Pick images, show local previews, and upload each immediately.
+    const addFiles = async (fileList: FileList | File[]) => {
+        const files = Array.from(fileList).filter((f) => f.type.startsWith('image/'));
+        if (!files.length) return;
+        const created: Attachment[] = files.map((f) => ({
+            id: makeId(),
+            name: f.name,
+            previewUrl: URL.createObjectURL(f),
+            status: 'uploading',
+        }));
+        setAttachments((prev) => [...prev, ...created]);
+
+        await Promise.all(
+            created.map(async (att, idx) => {
+                try {
+                    const up = await agentUploadImage(files[idx]);
+                    setAttachments((prev) =>
+                        prev.map((a) =>
+                            a.id === att.id
+                                ? { ...a, status: 'done', serverPath: up.path, serverUrl: up.url }
+                                : a,
+                        ),
+                    );
+                } catch (e: any) {
+                    setAttachments((prev) =>
+                        prev.map((a) =>
+                            a.id === att.id
+                                ? { ...a, status: 'error', error: e?.message || '上传失败' }
+                                : a,
+                        ),
+                    );
+                }
+            }),
+        );
+    };
+
+    const removeAttachment = (id: string) => {
+        setAttachments((prev) => {
+            const target = prev.find((a) => a.id === id);
+            if (target) URL.revokeObjectURL(target.previewUrl);
+            return prev.filter((a) => a.id !== id);
+        });
+    };
+
     const handleSend = async () => {
         const text = input.trim();
-        if (!text || loading) return;
+        const ready = attachments.filter((a) => a.status === 'done');
+        const uploading = attachments.some((a) => a.status === 'uploading');
+        if (loading || uploading) return;
+        if (!text && ready.length === 0) return;
+
+        const imagePaths = ready.map((a) => a.serverPath as string);
+        const chatImages: ChatImage[] = ready.map((a) => ({
+            url: a.serverUrl as string,
+            name: a.name,
+        }));
+        // Local preview object URLs are no longer needed once the server URLs
+        // are available; clear the tray before the request runs.
+        attachments.forEach((a) => URL.revokeObjectURL(a.previewUrl));
+        setAttachments([]);
         setInput('');
         setLoading(true);
         const wasNew = !sessionId;
-        // user message + a streaming assistant placeholder
+        // user message (with thumbnails) + a streaming assistant placeholder
         setMessages((prev) => [
             ...prev,
-            { role: 'user', text },
-            { role: 'assistant', text: '', toolSteps: [], streaming: true },
+            { role: 'user', text, images: chatImages.length ? chatImages : undefined },
+            { role: 'assistant', text: '', streaming: true },
         ]);
 
         let acc = '';
-        const steps: ToolStep[] = [];
         try {
-            await agentChatStream(text, sessionId ?? undefined, (ev) => {
-                if (ev.type === 'session') {
-                    setSessionId(ev.session_id);
-                } else if (ev.type === 'text') {
-                    acc += ev.delta;
-                    patchLast({ text: acc });
-                } else if (ev.type === 'tool_call') {
-                    const f = friendlyTool(ev.name, ev.args);
-                    steps.push({ name: ev.name, label: f.label, detail: f.detail, status: 'running' });
-                    patchLast({ toolSteps: [...steps] });
-                } else if (ev.type === 'tool_result') {
-                    for (let i = steps.length - 1; i >= 0; i--) {
-                        if (steps[i].name === ev.name && steps[i].status === 'running') {
-                            steps[i] = { ...steps[i], status: ev.ok ? 'done' : 'error' };
-                            break;
-                        }
+            await agentChatStream(
+                text,
+                sessionId ?? undefined,
+                (ev) => {
+                    if (ev.type === 'session') {
+                        setSessionId(ev.session_id);
+                    } else if (ev.type === 'intent') {
+                        patchLast({
+                            intent: {
+                                intent: ev.intent,
+                                label: ev.label,
+                                confidence: ev.confidence,
+                                source: ev.source,
+                                needs_plan: ev.needs_plan,
+                            },
+                        });
+                    } else if (ev.type === 'plan') {
+                        patchLast({
+                            planSteps: Array.isArray(ev.steps) ? ev.steps.map((s) => ({ ...s })) : [],
+                        });
+                    } else if (ev.type === 'evidence') {
+                        patchLast({
+                            evidence: Array.isArray(ev.records) ? ev.records : [],
+                        });
+                    } else if (ev.type === 'text') {
+                        acc += ev.delta;
+                        patchLast({ text: acc });
+                    } else if (ev.type === 'tool_call') {
+                        const role = ev.role ?? roleForTool(ev.name);
+                        patchLastMsg((msg) => {
+                            const trace = [
+                                ...(msg.trace ?? []),
+                                { role, name: ev.name, title: ev.title, status: 'running' as const, stepId: ev.step_id },
+                            ];
+                            let planSteps = msg.planSteps;
+                            if (ev.step_id && planSteps && planSteps.length > 0) {
+                                planSteps = planSteps.map((s) =>
+                                    s.step_id === ev.step_id ? { ...s, status: 'running' as const } : s,
+                                );
+                            }
+                            return { ...msg, trace, planSteps };
+                        });
+                    } else if (ev.type === 'tool_result') {
+                        patchLastMsg((msg) => {
+                            const trace = [...(msg.trace ?? [])];
+                            for (let i = trace.length - 1; i >= 0; i--) {
+                                if (trace[i].status !== 'running') continue;
+                                const hit = ev.step_id
+                                    ? trace[i].stepId === ev.step_id
+                                    : trace[i].name === ev.name;
+                                if (hit) {
+                                    trace[i] = { ...trace[i], status: ev.ok ? 'done' : 'error' };
+                                    break;
+                                }
+                            }
+                            let planSteps = msg.planSteps;
+                            if (ev.step_id && planSteps && planSteps.length > 0) {
+                                planSteps = planSteps.map((s) =>
+                                    s.step_id === ev.step_id
+                                        ? { ...s, status: ev.ok ? 'done' : 'error' }
+                                        : s,
+                                );
+                            }
+                            return { ...msg, trace, planSteps };
+                        });
+                    } else if (ev.type === 'final') {
+                        acc = ev.answer || acc;
+                        patchLast({ text: acc });
+                    } else if (ev.type === 'guard') {
+                        patchLast({ guard: ev });
+                    } else if (ev.type === 'error') {
+                        acc += (acc ? '\n\n' : '') + '提示：' + ev.message;
+                        patchLast({ text: acc });
                     }
-                    patchLast({ toolSteps: [...steps] });
-                } else if (ev.type === 'final') {
-                    acc = ev.answer || acc;
-                    patchLast({ text: acc });
-                } else if (ev.type === 'error') {
-                    acc += (acc ? '\n\n' : '') + '⚠️ ' + ev.message;
-                    patchLast({ text: acc });
-                }
-            });
+                },
+                undefined,
+                imagePaths,
+            );
         } catch (e: any) {
-            acc += (acc ? '\n\n' : '') + '⚠️ ' + (e?.message || '请求失败');
+            patchLastMsg((msg) => ({
+                ...msg,
+                trace: (msg.trace ?? []).map((t) =>
+                    t.status === 'running' ? { ...t, status: 'error' as const } : t,
+                ),
+                planSteps: (msg.planSteps ?? []).map((s) =>
+                    s.status === 'running' ? { ...s, status: 'error' as const } : s,
+                ),
+            }));
+            acc += (acc ? '\n\n' : '') + '提示：' + (e?.message || '请求失败');
             patchLast({ text: acc });
         } finally {
             patchLast({ streaming: false });
@@ -195,43 +332,43 @@ export default function AgentConsole() {
         <div className="h-full flex gap-4">
             {/* ============ Sessions sidebar ============ */}
             <div className="w-56 flex-shrink-0 flex flex-col glass-panel rounded-2xl overflow-hidden">
-                <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 flex-shrink-0">
-                    <span className="text-sm font-medium text-gray-300 flex items-center">
-                        <MessageSquare className="w-4 h-4 mr-2 text-cyan-400" /> 会话
+                <div className="flex items-center justify-between px-4 py-3 border-b border-[#dcdfe6] flex-shrink-0">
+                    <span className="text-sm font-medium text-[#333333] flex items-center">
+                        <MessageSquare className="w-4 h-4 mr-2 text-[#209F84]" /> 会话
                     </span>
                     <button
                         onClick={handleNewSession}
                         title="新会话"
-                        className="w-6 h-6 rounded-md bg-white/5 border border-white/10 flex items-center justify-center text-gray-300 hover:text-cyan-300 hover:border-cyan-500/30 transition-colors"
+                        className="w-6 h-6 rounded-md bg-[#f8f8fa] border border-[#dcdfe6] flex items-center justify-center text-[#333333] hover:text-[#209F84] hover:border-[#9cd2c7] transition-colors"
                     >
                         <Plus className="w-3.5 h-3.5" />
                     </button>
                 </div>
                 <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
                     {sessions.length === 0 && (
-                        <p className="text-xs text-gray-600 px-2 py-3">暂无历史会话</p>
+                        <p className="text-xs text-[#666666] px-2 py-3">暂无历史会话</p>
                     )}
                     {sessions.map((s) => (
                         <div
                             key={s.session_id}
                             onClick={() => switchSession(s.session_id)}
                             className={`group cursor-pointer rounded-lg px-3 py-2 border transition-colors ${s.session_id === sessionId
-                                ? 'bg-cyan-500/10 border-cyan-500/30'
-                                : 'bg-white/[0.02] border-transparent hover:bg-white/5'}`}
+                                ? 'bg-[#e6f4f0] border-[#9cd2c7]'
+                                : 'bg-[#f8f8fa] border-transparent hover:bg-[#f8f8fa]'}`}
                         >
                             <div className="flex items-center justify-between gap-1">
-                                <span className={`text-xs truncate ${s.session_id === sessionId ? 'text-cyan-300' : 'text-gray-200'}`}>
+                                <span className={`text-xs truncate ${s.session_id === sessionId ? 'text-[#209F84]' : 'text-[#333333]'}`}>
                                     {s.title || '新会话'}
                                 </span>
                                 <button
                                     onClick={(e) => handleDeleteSession(s.session_id, e)}
-                                    className="opacity-0 group-hover:opacity-100 text-gray-500 hover:text-red-400 transition-opacity flex-shrink-0"
+                                    className="opacity-0 group-hover:opacity-100 text-[#666666] hover:text-[#ff5b01] transition-opacity flex-shrink-0"
                                     title="删除会话"
                                 >
                                     <Trash2 className="w-3.5 h-3.5" />
                                 </button>
                             </div>
-                            <div className="text-[10px] text-gray-500 mt-0.5">
+                            <div className="text-[10px] text-[#666666] mt-0.5">
                                 {s.message_count} 条 · {s.last_active?.slice(5, 16)}
                             </div>
                         </div>
@@ -241,11 +378,11 @@ export default function AgentConsole() {
 
             {/* ============ Chat column ============ */}
             <div className="flex-1 flex flex-col glass-panel rounded-2xl overflow-hidden min-w-0">
-                <div className="flex items-center justify-between px-5 py-3 border-b border-white/10 flex-shrink-0">
-                    <div className="flex items-center text-cyan-400 font-medium min-w-0">
+                <div className="flex items-center justify-between px-5 py-3 border-b border-[#dcdfe6] flex-shrink-0">
+                    <div className="flex items-center text-[#209F84] font-medium min-w-0">
                         <Cpu className="w-4 h-4 mr-2 flex-shrink-0" />
-                        多智能体协同平台
-                        <span className="ml-3 text-xs text-gray-400 truncate">
+                        智能问答助手
+                        <span className="ml-3 text-xs text-[#666666] truncate">
                             {(() => {
                                 const cur = sessions.find((s) => s.session_id === sessionId);
                                 return cur?.title || (sessionId ? '当前会话' : '新会话（未保存）');
@@ -258,21 +395,85 @@ export default function AgentConsole() {
                     {messages.map((msg, i) => <MessageBubble key={i} msg={msg} />)}
                 </div>
 
-                <div className="p-4 border-t border-white/10 flex-shrink-0">
+                <div className="p-4 border-t border-[#dcdfe6] flex-shrink-0">
+                    {/* Pending attachment tray: thumbnails with upload/error state */}
+                    {attachments.length > 0 && (
+                        <div className="flex flex-wrap gap-2 mb-2.5">
+                            {attachments.map((a) => (
+                                <div
+                                    key={a.id}
+                                    className="relative group w-16 h-16 rounded-lg overflow-hidden border border-[#dcdfe6] bg-[#f8f8fa]"
+                                >
+                                    <img src={a.previewUrl} alt={a.name} className="w-full h-full object-cover" />
+                                    {a.status === 'uploading' && (
+                                        <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
+                                            <Loader2 className="w-4 h-4 text-[#333333] animate-spin" />
+                                        </div>
+                                    )}
+                                    {a.status === 'error' && (
+                                        <div
+                                            className="absolute inset-0 bg-[#fbe3d4] flex items-center justify-center"
+                                            title={a.error}
+                                        >
+                                            <CircleAlert className="w-4 h-4 text-[#333333]" />
+                                        </div>
+                                    )}
+                                    <button
+                                        onClick={() => removeAttachment(a.id)}
+                                        className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-black/60 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                                        title="移除"
+                                    >
+                                        <X className="w-2.5 h-2.5 text-[#333333]" />
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
                     <div className="relative">
+                        <input
+                            type="file"
+                            ref={fileRef}
+                            className="hidden"
+                            accept="image/*"
+                            multiple
+                            onChange={(e) => {
+                                if (e.target.files) addFiles(e.target.files);
+                                e.target.value = '';
+                            }}
+                        />
+                        <button
+                            onClick={() => fileRef.current?.click()}
+                            disabled={loading}
+                            title="上传图片"
+                            className="absolute left-2.5 top-1.5 w-8 h-8 rounded-full flex items-center justify-center text-[#666666] hover:text-[#209F84] hover:bg-[#f8f8fa] transition-colors disabled:opacity-40"
+                        >
+                            <ImagePlus className="w-5 h-5" />
+                        </button>
                         <input
                             type="text"
                             value={input}
                             disabled={loading}
                             onChange={(e) => setInput(e.target.value)}
                             onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                            placeholder={loading ? '智能体处理中…' : '输入问题，例如：给 tr01 做一次体检'}
-                            className="w-full bg-white/5 border border-white/10 rounded-full pl-5 pr-12 py-2.5 text-sm focus:outline-none focus:border-cyan-500/50 transition-colors disabled:opacity-50"
+                            onPaste={(e) => {
+                                const pasted = Array.from(e.clipboardData.items)
+                                    .filter((it) => it.type.startsWith('image/'))
+                                    .map((it) => it.getAsFile())
+                                    .filter((f): f is File => !!f);
+                                if (pasted.length) addFiles(pasted);
+                            }}
+                            placeholder={loading ? '正在分析…' : '输入问题，或点击左侧图标上传图片'}
+                            className="w-full bg-[#f8f8fa] border border-[#dcdfe6] rounded-full pl-12 pr-12 py-2.5 text-sm focus:outline-none focus:border-[#6ab8aa] transition-colors disabled:opacity-50"
                         />
                         <button
                             onClick={handleSend}
-                            disabled={loading || !input.trim()}
-                            className="absolute right-2 top-1.5 w-8 h-8 rounded-full bg-cyan-500 flex items-center justify-center hover:bg-cyan-400 transition-colors disabled:opacity-40"
+                            disabled={
+                                loading ||
+                                attachments.some((a) => a.status === 'uploading') ||
+                                (!input.trim() && !attachments.some((a) => a.status === 'done'))
+                            }
+                            className="absolute right-2 top-1.5 w-8 h-8 rounded-full bg-[#209F84] flex items-center justify-center hover:bg-[#209F84] transition-colors disabled:opacity-40"
                         >
                             {loading ? <Loader2 className="w-4 h-4 text-white animate-spin" /> : <Send className="w-4 h-4 text-white" />}
                         </button>
@@ -289,6 +490,31 @@ export default function AgentConsole() {
             />
         </div>
     );
+}
+
+const TOOL_FRIENDLY: Record<string, string> = {
+    edge_visible_detect: '图像缺陷检测',
+    edge_inspect: '图像结果复检',
+    edge_stream: '监控画面调阅',
+    edge_vlm_review: '图像综合复核',
+    transformer_diagnosis: '变压器健康诊断',
+    edge_alarm: '现场告警查询',
+    load_skill: '规程知识调用',
+    append_skill_memory: '分析经验积累',
+    save_memory: '分析结论保存',
+    middle_rag_ask: '规程条款检索',
+    history_lookup: '历史结论查询',
+    compose: '检修建议单生成',
+    spawn_agent: '专项分析调用',
+};
+
+const SKILL_FRIENDLY: Record<string, string> = {
+    'dga-interpretation': '油色谱判读指引',
+    'maintenance-report': '检修报告写作指引',
+};
+
+function skillFriendlyName(name: string) {
+    return SKILL_FRIENDLY[name] || name;
 }
 
 function CapabilityPanel({
@@ -325,230 +551,238 @@ function CapabilityPanel({
         }
     };
 
+    const businessTools = tools.filter(
+        (t) => TOOL_FRIENDLY[t.name] && t.name !== 'spawn_agent' && t.builtin !== false && !t.disabled,
+    );
+    const businessSkills = skills.filter((s) => SKILL_FRIENDLY[s.name]);
+
     return (
         <div className="w-80 flex-shrink-0 flex flex-col gap-4 overflow-y-auto custom-scrollbar">
             {notReady && (
-                <div className="glass-panel rounded-2xl p-4 text-xs text-amber-300/90 border border-amber-500/20">
-                    智能体尚未就绪（后端初始化失败或 Ollama 未启动）。
+                <div className="glass-panel rounded-2xl p-4 text-xs text-[#d99000] border border-[#f0d9a8]">
+                    问答服务暂时未就绪，请稍后刷新重试。
                 </div>
             )}
             {err && (
-                <div className="glass-panel rounded-2xl p-3 text-xs text-red-300/90 border border-red-500/20">
+                <div className="glass-panel rounded-2xl p-3 text-xs text-[#ff5b01] border border-[#f5c3a3]">
                     {err}
                 </div>
             )}
             {msg && (
-                <div className="glass-panel rounded-2xl p-3 text-xs text-emerald-300/90 border border-emerald-500/20">
+                <div className="glass-panel rounded-2xl p-3 text-xs text-[#5ba83c] border border-[#c4e3b0]">
                     {msg}
                 </div>
             )}
 
-            {/* Tools */}
+            {/* 业务主视图：可用分析能力 */}
             <div className="glass-panel rounded-2xl p-4">
-                <div className="flex items-center font-medium mb-3 text-cyan-400">
+                <div className="flex items-center font-medium mb-3 text-[#209F84]">
                     <Wrench className="w-4 h-4" />
-                    <span className="ml-2 text-sm">可调用工具 (Tools)</span>
-                    <span className="ml-auto text-xs text-gray-500">{tools.length}</span>
+                    <span className="ml-2 text-sm">可用分析能力</span>
+                    <span className="ml-auto text-xs text-[#666666]">{businessTools.length}</span>
                 </div>
-
                 <div className="space-y-2">
-                    {tools.length === 0 && <p className="text-xs text-gray-600">（无）</p>}
-                    {tools.map((t) => (
-                        <div key={t.name} className={`bg-white/5 rounded-lg px-3 py-2 border ${t.disabled ? 'border-white/5 opacity-60' : 'border-white/5'}`}>
-                            <div className="flex items-center">
-                                <span className="text-xs font-mono text-gray-200">{t.name}</span>
-                                {t.builtin && <span className="ml-2 text-[10px] px-1.5 rounded bg-cyan-500/15 text-cyan-300/80 border border-cyan-500/20">内置</span>}
-                                {t.disabled && <span className="ml-2 text-[10px] px-1.5 rounded bg-gray-500/20 text-gray-400">disabled</span>}
-                                <div className="ml-auto flex items-center gap-1">
-                                    <button
-                                        title={t.disabled ? '启用' : '禁用'}
-                                        disabled={!!busy}
-                                        onClick={() => run(`toggle-${t.name}`, () =>
-                                            t.disabled ? agentEnableTool(t.name) : agentDisableTool(t.name))}
-                                        className={`p-1 rounded hover:bg-white/10 ${t.disabled ? 'text-gray-500' : 'text-cyan-400'}`}
-                                    >
-                                        <Power className="w-3.5 h-3.5" />
-                                    </button>
-                                    {/* built-in tools are core capabilities — not removable */}
-                                    {!t.builtin && (
-                                        <button
-                                            title="移除"
-                                            disabled={!!busy}
-                                            onClick={() => run(`rm-${t.name}`, () => agentRemoveTool(t.name))}
-                                            className="p-1 rounded text-gray-500 hover:text-red-400 hover:bg-white/10"
-                                        >
-                                            <X className="w-3.5 h-3.5" />
-                                        </button>
-                                    )}
+                    {businessTools.length === 0 && <p className="text-xs text-[#666666]">暂无可展示的能力项。</p>}
+                    {businessTools.map((t) => {
+                        const role = roleForTool(t.name);
+                        return (
+                            <div key={t.name} className="bg-[#f8f8fa] rounded-lg px-3 py-2 border border-[#dcdfe6]">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="text-xs text-[#333333]">{TOOL_FRIENDLY[t.name]}</span>
+                                    <span className="text-[9px] text-[#666666]">{ROLE_META[role].tagline}</span>
                                 </div>
                             </div>
-                            <p className="text-[11px] text-gray-500 mt-1 line-clamp-2">{t.description}</p>
-                        </div>
-                    ))}
+                        );
+                    })}
                 </div>
+            </div>
 
-                {/* add remote tool */}
-                <div className="mt-3 pt-3 border-t border-white/10 space-y-2">
-                    <div className="flex items-center text-[11px] text-gray-500">
-                        <Cloud className="w-3.5 h-3.5 mr-1" /> 热加载远程 A2A 工具
+            {/* 业务主视图：规程知识条目 */}
+            <div className="glass-panel rounded-2xl p-4">
+                <div className="flex items-center font-medium mb-3 text-[#8a63e0]">
+                    <BookOpen className="w-4 h-4" />
+                    <span className="ml-2 text-sm">规程知识条目</span>
+                    <span className="ml-auto text-xs text-[#666666]">{businessSkills.length}</span>
+                </div>
+                <div className="space-y-2">
+                    {businessSkills.length === 0 && (
+                        <p className="text-xs text-[#666666]">暂无规程知识条目。</p>
+                    )}
+                    {businessSkills.map((s) => (
+                            <div key={s.name} className="bg-[#f8f8fa] rounded-lg px-3 py-2 border border-[#dcdfe6]">
+                                <span className="text-xs text-[#333333]">{skillFriendlyName(s.name)}</span>
+                                <p className="text-[11px] text-[#666666] mt-1 line-clamp-2">{s.description}</p>
+                            </div>
+                        ))}
+                </div>
+            </div>
+
+            {/* 高级运维（默认折叠，仅系统管理员使用，不进入普通业务流程） */}
+            <details className="glass-panel rounded-2xl p-3">
+                <summary className="cursor-pointer text-[11px] text-[#666666] select-none hover:text-[#333333]">
+                    高级运维（仅系统管理员）
+                </summary>
+                <div className="mt-3 space-y-3">
+                    {tools.filter((t) => !t.builtin).length > 0 && (
+                    <div className="space-y-1.5">
+                        <div className="text-[11px] text-[#666666]">可选能力维护（管理员）</div>
+                        {tools.filter((t) => !t.builtin).map((t) => (
+                            <div key={t.name} className="flex items-center gap-2 text-[11px] text-[#666666]">
+                                <span className="flex-1 truncate">{TOOL_FRIENDLY[t.name] || t.name}</span>
+                                <button
+                                    title={t.disabled ? '启用' : '禁用'}
+                                    disabled={!!busy}
+                                    onClick={() => run(`toggle-${t.name}`, () =>
+                                        t.disabled ? agentEnableTool(t.name) : agentDisableTool(t.name))}
+                                    className="p-1 rounded hover:bg-[#f2f4f6] text-[#666666]"
+                                >
+                                    <Power className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                    title="移除"
+                                    disabled={!!busy}
+                                    onClick={() => run(`rm-${t.name}`, () => agentRemoveTool(t.name))}
+                                    className="p-1 rounded text-[#666666] hover:text-[#ff5b01] hover:bg-[#f2f4f6]"
+                                >
+                                    <X className="w-3.5 h-3.5" />
+                                </button>
+                            </div>
+                        ))}
                     </div>
-                    <input
-                        value={remoteUrl}
-                        onChange={(e) => setRemoteUrl(e.target.value)}
-                        placeholder="http://host:port"
-                        className="w-full bg-white/5 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-cyan-500/50"
-                    />
-                    <div className="flex gap-1.5">
+                    )}
+
+                    <div className="space-y-2 pt-2 border-t border-[#dcdfe6]">
+                        <div className="flex items-center text-[11px] text-[#666666]">
+                            <Cloud className="w-3.5 h-3.5 mr-1" /> 扩展分析服务接入
+                        </div>
                         <input
-                            value={remoteName}
-                            onChange={(e) => setRemoteName(e.target.value)}
-                            placeholder="名称(可选, 探活失败时必填)"
-                            className="flex-1 min-w-0 bg-white/5 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-cyan-500/50"
+                            value={remoteUrl}
+                            onChange={(e) => setRemoteUrl(e.target.value)}
+                            placeholder="扩展服务地址（管理员填写）"
+                            className="w-full bg-[#f8f8fa] border border-[#dcdfe6] rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-[#6ab8aa]"
                         />
+                        <div className="flex gap-1.5">
+                            <input
+                                value={remoteName}
+                                onChange={(e) => setRemoteName(e.target.value)}
+                                placeholder="显示名称（可选）"
+                                className="flex-1 min-w-0 bg-[#f8f8fa] border border-[#dcdfe6] rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-[#6ab8aa]"
+                            />
+                            <button
+                                disabled={!!busy || !remoteUrl.trim()}
+                                onClick={() => run('add-remote', async () => {
+                                    const c = await agentRegisterRemote(remoteUrl.trim(), remoteName.trim() || undefined);
+                                    setRemoteUrl(''); setRemoteName('');
+                                    return c;
+                                }, (r) => `已注册：${r.registered ?? 1} 项`)}
+                                className="px-3 rounded-lg bg-[#dceee9] text-[#209F84] border border-[#9cd2c7] text-xs hover:bg-[#cde8e1] disabled:opacity-40"
+                            >
+                                {busy === 'add-remote' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '接入'}
+                            </button>
+                        </div>
                         <button
-                            disabled={!!busy || !remoteUrl.trim()}
-                            onClick={() => run('add-remote', async () => {
-                                const c = await agentRegisterRemote(remoteUrl.trim(), remoteName.trim() || undefined);
-                                setRemoteUrl(''); setRemoteName('');
-                                return c;
-                            }, (r) => `已注册远程工具: ${r.registered}`)}
-                            className="px-3 rounded-lg bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs hover:bg-cyan-500/30 disabled:opacity-40"
+                            disabled={!!busy}
+                            onClick={() => run('reload-remote', agentReloadRemote,
+                                (r) => (r.added?.length ? `更新 ${r.added.length} 项` : '无新增项'))}
+                            className="w-full text-[11px] py-1.5 rounded-lg bg-[#f8f8fa] border border-[#dcdfe6] text-[#666666] hover:text-[#333333] flex items-center justify-center gap-1 disabled:opacity-40"
                         >
-                            {busy === 'add-remote' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '加'}
+                            <RefreshCw className={`w-3 h-3 ${busy === 'reload-remote' ? 'animate-spin' : ''}`} /> 刷新扩展服务清单
                         </button>
                     </div>
+
+                    <div className="space-y-2 pt-2 border-t border-[#dcdfe6]">
+                        <div className="flex items-center text-[11px] text-[#666666]">
+                            <FolderSearch className="w-3.5 h-3.5 mr-1" /> 本地补充规则目录
+                        </div>
+                        <div className="flex gap-1.5">
+                            <input
+                                value={dirPath}
+                                onChange={(e) => setDirPath(e.target.value)}
+                                placeholder="本地规则目录（管理员填写）"
+                                className="flex-1 min-w-0 bg-[#f8f8fa] border border-[#dcdfe6] rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-[#6ab8aa]"
+                            />
+                            <button
+                                disabled={!!busy || !dirPath.trim()}
+                                onClick={() => run('load-dir', async () => {
+                                    const c = await agentLoadDir(dirPath.trim());
+                                    setDirPath('');
+                                    return c;
+                                }, (r) => (r.added?.length ? `新增 ${r.added.length} 项` : '未发现可加载能力'))}
+                                className="px-2.5 rounded-lg bg-[#dceee9] text-[#209F84] border border-[#9cd2c7] text-xs hover:bg-[#cde8e1] disabled:opacity-40"
+                            >
+                                {busy === 'load-dir' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '读取'}
+                            </button>
+                        </div>
+                    </div>
+
                     <button
                         disabled={!!busy}
-                        onClick={() => run('reload-remote', agentReloadRemote,
-                            (r) => (r.added?.length ? `新增远程: ${r.added.join(', ')}` : '无新增(全部已注册或无 enabled 项)'))}
-                        className="w-full text-[11px] py-1.5 rounded-lg bg-white/5 border border-white/10 text-gray-400 hover:text-gray-200 flex items-center justify-center gap-1 disabled:opacity-40"
+                        onClick={() => run('reload-skills', agentReloadSkills,
+                            (r) => `已刷新知识条目（${r.skills.length} 个）`)}
+                        className="w-full text-[11px] py-1.5 rounded-lg bg-[#f3edfd] border border-[#d6c6f5] text-[#8a63e0] hover:bg-[#e6d8fb] flex items-center justify-center gap-1 disabled:opacity-40"
                     >
-                        <RefreshCw className={`w-3 h-3 ${busy === 'reload-remote' ? 'animate-spin' : ''}`} /> 重载 remote_tools.yaml
+                        <RefreshCw className={`w-3 h-3 ${busy === 'reload-skills' ? 'animate-spin' : ''}`} /> 刷新规程知识条目
                     </button>
                 </div>
-
-                {/* scan a directory for local tools */}
-                <div className="mt-3 pt-3 border-t border-white/10 space-y-2">
-                    <div className="flex items-center text-[11px] text-gray-500">
-                        <FolderSearch className="w-3.5 h-3.5 mr-1" /> 扫描目录加载本地工具
-                    </div>
-                    <div className="flex gap-1.5">
-                        <input
-                            value={dirPath}
-                            onChange={(e) => setDirPath(e.target.value)}
-                            placeholder="examples/hot_tools"
-                            className="flex-1 min-w-0 bg-white/5 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-cyan-500/50"
-                        />
-                        <button
-                            disabled={!!busy || !dirPath.trim()}
-                            onClick={() => run('load-dir', async () => {
-                                const c = await agentLoadDir(dirPath.trim());
-                                setDirPath('');
-                                return c;
-                            }, (r) => (r.added?.length
-                                ? `新增工具: ${r.added.join(', ')}`
-                                : '未发现可加载工具(该目录 .py 需在模块级写 TOOL=... 或 TOOLS=[...])'))}
-                            className="px-2.5 rounded-lg bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs hover:bg-cyan-500/30 disabled:opacity-40"
-                        >
-                            {busy === 'load-dir' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '扫描'}
-                        </button>
-                    </div>
-                    <p className="text-[10px] text-gray-600">
-                        相对路径以仓库根为基准。内置工具(tools/ 下)是类形式 + 在 tools.yaml 声明,
-                        不经此扫描;示例可填 <span className="text-gray-500">examples/hot_tools</span>。
-                    </p>
-                </div>
-            </div>
-
-            {/* Skills */}
-            <div className="glass-panel rounded-2xl p-4">
-                <div className="flex items-center font-medium mb-1 text-violet-400">
-                    <BookOpen className="w-4 h-4" />
-                    <span className="ml-2 text-sm">领域知识技能 (Skills)</span>
-                    <span className="ml-auto text-xs text-gray-500">{skills.length}</span>
-                </div>
-                <p className="text-[11px] text-gray-500 mb-3">经 load_skill 按需加载</p>
-                <div className="space-y-2">
-                    {skills.length === 0 && <p className="text-xs text-gray-600">（无）</p>}
-                    {skills.map((s) => (
-                        <div key={s.name} className="bg-white/5 rounded-lg px-3 py-2 border border-white/5">
-                            <span className="text-xs font-mono text-gray-200">{s.name}</span>
-                            <p className="text-[11px] text-gray-500 mt-1 line-clamp-2">{s.description}</p>
-                        </div>
-                    ))}
-                </div>
-                <button
-                    disabled={!!busy}
-                    onClick={() => run('reload-skills', agentReloadSkills,
-                        (r) => `已重载知识技能 (${r.skills.length} 个)`)}
-                    className="mt-3 w-full text-[11px] py-1.5 rounded-lg bg-violet-500/10 border border-violet-500/20 text-violet-300 hover:bg-violet-500/20 flex items-center justify-center gap-1 disabled:opacity-40"
-                >
-                    <RefreshCw className={`w-3 h-3 ${busy === 'reload-skills' ? 'animate-spin' : ''}`} /> 重载知识技能 (扫描 SKILL.md)
-                </button>
-            </div>
+            </details>
         </div>
     );
-}
-
-function StepIcon({ status }: { status: ToolStep['status'] }) {
-    if (status === 'running') return <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-400" />;
-    if (status === 'done') return <Check className="w-3.5 h-3.5 text-emerald-400" />;
-    return <CircleAlert className="w-3.5 h-3.5 text-red-400" />;
-}
-
-function Workflow({ steps }: { steps: (ToolStep & { icon?: React.ReactNode })[] }) {
-    return (
-        <div className="glass-panel rounded-xl px-3 py-2 space-y-1.5 border border-white/5">
-            <div className="text-[10px] uppercase tracking-wider text-gray-500 flex items-center">
-                <Sparkles className="w-3 h-3 mr-1" /> 工作流
-            </div>
-            {steps.map((s, i) => (
-                <div key={i} className="flex items-center text-xs">
-                    <span className="w-4 flex justify-center mr-1.5 text-gray-400">{s.icon ?? <Wrench className="w-3.5 h-3.5" />}</span>
-                    <span className={s.status === 'error' ? 'text-red-300' : 'text-gray-200'}>{s.label}</span>
-                    {s.detail && <span className="ml-1.5 text-gray-500 font-mono text-[11px]">{s.detail}</span>}
-                    <span className="ml-auto pl-2"><StepIcon status={s.status} /></span>
-                </div>
-            ))}
-        </div>
-    );
-}
-
-// friendlyTool returns an icon; attach it onto steps for rendering.
-function withIcons(steps: ToolStep[]): (ToolStep & { icon?: React.ReactNode })[] {
-    return steps.map((s) => ({ ...s, icon: friendlyTool(s.name, {}).icon }));
 }
 
 function MessageBubble({ msg }: { msg: ChatMsg }) {
     const isUser = msg.role === 'user';
-    const steps = msg.toolSteps && msg.toolSteps.length > 0 ? withIcons(msg.toolSteps) : [];
-    const showThinking = msg.streaming && !msg.text && steps.length === 0;
+    const hasCards = Boolean(msg.planSteps?.length || msg.trace?.length || msg.evidence?.length);
+    const showThinking = msg.streaming && !msg.text && !hasCards;
+    const displayText = sanitizeDisplay(msg.text);
+
     return (
         <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
             <div className={`max-w-[85%] flex space-x-2 ${isUser ? 'flex-row-reverse space-x-reverse' : 'flex-row'}`}>
-                <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${isUser ? 'bg-cyan-500/20 text-cyan-400' : 'bg-blue-500/20 text-blue-400'}`}>
+                <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${isUser ? 'bg-[#dceee9] text-[#209F84]' : 'bg-[#e2f2da] text-[#5ba83c]'}`}>
                     {isUser ? <User className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
                 </div>
-                <div className="space-y-1.5 min-w-0">
-                    {!isUser && steps.length > 0 && <Workflow steps={steps} />}
+                <div className="space-y-2 min-w-0">
+                    {!isUser && (
+                        <>
+                            {msg.intent && <IntentBadge intent={msg.intent} />}
+                            {!!msg.planSteps?.length && <PlanPanel steps={msg.planSteps} />}
+                            <CollaborationGraph trace={msg.trace ?? []} plannedCount={msg.planSteps?.length ?? 0} />
+                            {!!msg.evidence?.length && <EvidenceCard records={msg.evidence} />}
+                            {msg.guard && <GuardCard guard={msg.guard} />}
+                        </>
+                    )}
 
                     {showThinking && (
-                        <div className="glass-panel px-4 py-2.5 rounded-2xl text-sm text-gray-400 flex items-center">
+                        <div className="glass-panel px-4 py-2.5 rounded-2xl text-sm text-[#666666] flex items-center">
                             <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" /> 智能体思考中…
+                        </div>
+                    )}
+
+                    {isUser && msg.images && msg.images.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 justify-end">
+                            {msg.images.map((img, k) => (
+                                <img
+                                    key={k}
+                                    src={img.url}
+                                    alt={img.name}
+                                    title={img.name}
+                                    className="max-h-48 rounded-xl border border-[#dcdfe6] object-cover"
+                                />
+                            ))}
                         </div>
                     )}
 
                     {msg.text && (
                         isUser ? (
-                            <div className="px-4 py-2.5 rounded-2xl text-sm whitespace-pre-wrap leading-relaxed bg-cyan-500 text-white shadow-[0_4px_12px_rgba(0,208,255,0.2)]">
-                                {msg.text}
+                            <div className="px-4 py-2.5 rounded-2xl text-sm whitespace-pre-wrap leading-relaxed bg-[#209F84] text-white shadow-sm">
+                                {displayText}
                             </div>
                         ) : (
-                            <div className="px-4 py-2.5 rounded-2xl glass-panel text-gray-200">
+                            <div className="px-4 py-2.5 rounded-2xl glass-panel text-[#333333]">
                                 <div className="md-body">
-                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayText}</ReactMarkdown>
                                 </div>
-                                {msg.streaming && <span className="inline-block w-1.5 h-4 align-middle bg-cyan-400/70 animate-pulse ml-0.5" />}
+                                {msg.streaming && <span className="inline-block w-1.5 h-4 align-middle bg-[#209F84] animate-pulse ml-0.5" />}
                             </div>
                         )
                     )}

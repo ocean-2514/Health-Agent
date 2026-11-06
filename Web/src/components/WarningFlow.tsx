@@ -1,60 +1,103 @@
-import React, { useEffect, useState } from 'react';
-import { AlertCircle, Clock } from 'lucide-react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { AlertCircle, Clock, RefreshCw, WifiOff } from 'lucide-react';
+import { edgeAlarms, type EdgeAlarm } from '../lib/api';
 
-const mockLogs = [
-    { id: 1, level: 'critical', time: '17:45:12', device: '1号主变', msg: '分接开关动作频率异常' },
-    { id: 2, level: 'warning', time: '17:42:05', device: '2号主变', msg: '绕组温度接近阈值' },
-    { id: 3, level: 'normal', time: '17:38:22', device: '1号主变', msg: '绝缘电阻自检完成' },
-    { id: 4, level: 'warning', time: '17:30:10', device: '3号主变', msg: '环境湿度较大' },
-    { id: 5, level: 'critical', time: '17:15:45', device: '1号主变', msg: '氢气含量轻微波动' },
-];
+const severityStyle = (level: string) => {
+    if (level === 'critical') return { bar: '#FF5B01', badge: 'bg-[#f9d9c6] text-[#ff5b01]' };
+    if (level === 'warning') return { bar: '#FCAA00', badge: 'bg-amber-500/20 text-[#d99000]' };
+    return { bar: '#6FBA47', badge: 'bg-[#e2f2da] text-[#5ba83c]' };
+};
 
-export default function WarningFlow() {
-    const [logs, setLogs] = useState(mockLogs);
+const formatTime = (iso: string) => {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+};
+
+export default function WarningFlow({ onOpenAlarm }: { onOpenAlarm?: (cameraId: string) => void }) {
+    const [alarms, setAlarms] = useState<EdgeAlarm[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [offline, setOffline] = useState(false);
+    const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+    const load = useCallback(async () => {
+        try {
+            const data = await edgeAlarms();
+            // newest first
+            const sorted = [...data].sort((a, b) =>
+                new Date(b.create_time).getTime() - new Date(a.create_time).getTime()
+            );
+            setAlarms(sorted);
+            setOffline(false);
+        } catch {
+            setOffline(true);
+        } finally {
+            setLoading(false);
+        }
+    }, []);
 
     useEffect(() => {
-        const interval = setInterval(() => {
-            setLogs(prev => {
-                const newLog = {
-                    ...prev[Math.floor(Math.random() * prev.length)],
-                    id: Date.now(),
-                    time: new Date().toLocaleTimeString([], { hour12: false })
-                };
-                return [newLog, ...prev.slice(0, 9)];
-            });
-        }, 5000);
-        return () => clearInterval(interval);
-    }, []);
+        load();
+        // Poll the REAL endpoint (refresh, not fabrication) so new detections show.
+        timerRef.current = setInterval(load, 10000);
+        return () => { if (timerRef.current) clearInterval(timerRef.current); };
+    }, [load]);
 
     return (
         <div className="flex flex-col h-full">
-            <div className="px-4 py-3 border-b border-white/10 font-medium text-cyan-400 flex items-center">
-                <AlertCircle className="w-4 h-4 mr-2" />
-                实时警告流
+            <div className="px-4 py-3 border-b border-[#dcdfe6] font-medium text-[#209F84] flex items-center justify-between">
+                <div className="flex items-center">
+                    <AlertCircle className="w-4 h-4 mr-2" />
+                    告警流
+                </div>
+                <button
+                    onClick={load}
+                    title="刷新真实告警"
+                    className="text-[#666666] hover:text-[#209F84] transition-colors"
+                >
+                    <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+                </button>
             </div>
             <div className="flex-1 overflow-y-auto custom-scrollbar pt-2 px-2">
-                <div className="space-y-2">
-                    {logs.map(log => (
-                        <div key={log.id} className="glass-panel p-3 rounded-lg border-l-4 transition-all duration-300"
-                            style={{
-                                borderLeftColor: log.level === 'critical' ? '#FF4D4D' : log.level === 'warning' ? '#FFB800' : '#00FF85',
-                                backgroundColor: 'rgba(255,255,255,0.02)'
-                            }}>
-                            <div className="flex items-center justify-between mb-1">
-                                <span className={`text-[10px] uppercase font-bold px-1.5 py-0.5 rounded ${log.level === 'critical' ? 'bg-red-500/20 text-red-400' : 'bg-amber-500/20 text-amber-400'
-                                    }`}>
-                                    {log.level}
-                                </span>
-                                <div className="flex items-center text-[10px] text-gray-500">
-                                    <Clock className="w-3 h-3 mr-1" />
-                                    {log.time}
+                {offline ? (
+                    <div className="m-2 p-4 rounded-lg border border-[#f0ac84] bg-[#fdeee6] text-[#ff5b01] text-xs flex items-start">
+                        <WifiOff className="w-4 h-4 mr-2 flex-shrink-0 mt-0.5" />
+                        <span>现场检测服务暂未连接，无法获取实时告警；请确认采集服务运行后点击刷新。</span>
+                    </div>
+                ) : loading ? (
+                    <p className="text-xs text-[#666666] p-4 animate-pulse">正在加载真实告警…</p>
+                ) : alarms.length === 0 ? (
+                    <p className="text-xs text-[#666666] p-4">暂无告警。检测到真实缺陷后将在此显示。</p>
+                ) : (
+                    <div className="space-y-2">
+                        {alarms.map(alarm => {
+                            const st = severityStyle(alarm.severity);
+                            return (
+                                <div key={alarm.id}
+                                    onClick={() => onOpenAlarm?.(alarm.camera_id)}
+                                    className={`glass-panel p-3 rounded-lg border-l-4 ${onOpenAlarm ? 'cursor-pointer hover:border-[#9cd2c7]' : ''}`}
+                                    style={{ borderLeftColor: st.bar, backgroundColor: '#f8f8fa' }}
+                                    title="点击查看对应监控画面">
+                                    <div className="flex items-center justify-between mb-1">
+                                        <span className={`text-[10px] uppercase font-bold px-1.5 py-0.5 rounded ${st.badge}`}>
+                                            {alarm.severity}
+                                        </span>
+                                        <div className="flex items-center text-[10px] text-[#666666]">
+                                            <Clock className="w-3 h-3 mr-1" />
+                                            {formatTime(alarm.create_time)}
+                                        </div>
+                                    </div>
+                                    <div className="text-xs font-semibold text-[#333333] mb-1">{alarm.camera_name}</div>
+                                    <div className="text-[11px] text-[#666666] leading-relaxed mb-1">{alarm.result}</div>
+                                    <div className="text-[10px] text-[#666666]">
+                                        {alarm.algorithm_name} · 置信度 {(alarm.confidence * 100).toFixed(1)}%
+                                    </div>
                                 </div>
-                            </div>
-                            <div className="text-xs font-semibold text-gray-200 mb-1">{log.device}</div>
-                            <div className="text-[11px] text-gray-400 leading-relaxed">{log.msg}</div>
-                        </div>
-                    ))}
-                </div>
+                            );
+                        })}
+                    </div>
+                )}
             </div>
         </div>
     );

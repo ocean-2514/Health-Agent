@@ -1,113 +1,245 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import AIChat from '../components/AIChat';
+import ModalityFusion from '../components/ModalityFusion';
+import ReportWorkorder from '../components/ReportWorkorder';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/Card';
-import { assessHealth, assessDefect } from '../lib/api';
-import { Play, Table, BarChart3, History, Info } from 'lucide-react';
+import { assessHealth, assessDefect, deviceLedger, deviceHistory, deviceDga, type Ledger } from '../lib/api';
+import { useData } from '../lib/store';
+import { Table, BarChart3, History, Info } from 'lucide-react';
 
-export default function ReasoningHub({ deviceId }: { deviceId?: string }) {
+// DGA 气体键与中文标签（与 ModalityFusion 视图保持一致）
+const GAS_LABELS: Record<string, string> = {
+    H2: 'H2 (氢气)',
+    CH4: 'CH4 (甲烷)',
+    C2H6: 'C2H6 (乙烷)',
+    C2H4: 'C2H4 (乙烯)',
+    C2H2: 'C2H2 (乙炔)',
+    CO: 'CO (一氧化碳)',
+    CO2: 'CO2 (二氧化碳)',
+};
+const GAS_ORDER = ['H2', 'CH4', 'C2H6', 'C2H4', 'C2H2', 'CO', 'CO2'];
+
+export default function ReasoningHub({
+    deviceId,
+    onNavigateAgent,
+}: {
+    deviceId?: string;
+    onNavigateAgent?: () => void;
+}) {
+    const { overview } = useData();
     const [data, setData] = useState<any>(null);
     const [defectData, setDefectData] = useState<any>(null);
+    const [ledgerInfo, setLedgerInfo] = useState<Ledger | null>(null);
+    const [history, setHistory] = useState<Array<{ date: string; type: string; result: string; operator: string }>>([]);
+    const [dgaSample, setDgaSample] = useState<any>(null);
     const [loading, setLoading] = useState(true);
-    const requestRef = useRef<boolean>(false);
 
     useEffect(() => {
-        if (requestRef.current) return;
-        requestRef.current = true;
-        
+        let cancelled = false;
         setLoading(true);
+        // 评估接口可能耗时较长；超时后不阻断页面，确定性样本值由统一概览层兜底。
+        const withGuard = (p: Promise<any>) =>
+            new Promise<any>((resolve) => {
+                const timer = setTimeout(() => resolve({ __failed: true }), 40000);
+                p.then((v) => { clearTimeout(timer); resolve(v); })
+                    .catch(() => { clearTimeout(timer); resolve({ __failed: true }); });
+            });
+
         Promise.all([
-            assessHealth({ id: deviceId }),
-            assessDefect({ id: deviceId })
+            withGuard(assessHealth({ id: deviceId, use_profile: true })),
+            withGuard(assessDefect({ id: deviceId }))
         ]).then(([healthRes, defectRes]) => {
-            setData(healthRes);
-            setDefectData(defectRes);
+            if (cancelled) return;
+            const healthBad = !healthRes || healthRes.__failed;
+            const defectBad = !defectRes || defectRes.__failed;
+            setData(healthBad ? {} : healthRes);
+            setDefectData(defectBad ? {} : defectRes);
             setLoading(false);
         });
+
+        deviceLedger(deviceId ?? 'tr01').then((r) => { if (!cancelled) setLedgerInfo(r); });
+        deviceHistory(deviceId ?? 'tr01').then((r) => { if (!cancelled) setHistory(r?.records ?? []); });
+        return () => { cancelled = true; };
     }, [deviceId]);
 
-    const hiData = data?.health_deduction_curve?.x?.map((x: number, i: number) => ({
+    useEffect(() => {
+        let cancelled = false;
+        deviceDga(deviceId ?? 'tr01').then((r) => { if (!cancelled) setDgaSample(r); });
+        return () => { cancelled = true; };
+    }, [deviceId]);
+
+    const overviewDevice = useMemo(
+        () => overview?.stations.flatMap((s) => s.devices).find((d) => d.equipment_id === deviceId),
+        [overview, deviceId],
+    );
+
+    const curveSource = data?.health_deduction_curve?.x?.length
+        ? data.health_deduction_curve
+        : overviewDevice?.health_curve;
+    const hiData = (curveSource?.x ?? []).map((x: number, i: number) => ({
         name: x,
-        HI: data.health_deduction_curve.y[i]
-    })) || [];
+        HI: curveSource.y[i],
+    }));
 
-    const dgaData = data?.dga_data ? [
-        { label: 'H2 (氢气)', value: data.dga_data.H2?.values?.slice(-1)[0] || '0.0', unit: 'uL/L', status: 'normal' },
-        { label: 'CH4 (甲烷)', value: data.dga_data.CH4?.values?.slice(-1)[0] || '0.0', unit: 'uL/L', status: 'normal' },
-        { label: 'C2H2 (乙炔)', value: data.dga_data.C2H2?.values?.slice(-1)[0] || '0.0', unit: 'uL/L', status: 'normal' },
-        { label: 'C2H4 (乙烯)', value: data.dga_data.C2H4?.values?.slice(-1)[0] || '0.0', unit: 'uL/L', status: 'warning' },
-        { label: 'CO (一氧化碳)', value: data.dga_data.CO?.values?.slice(-1)[0] || '0.0', unit: 'uL/L', status: 'normal' },
-        { label: 'CO2 (二氧化碳)', value: data.dga_data.CO2?.values?.slice(-1)[0] || '0.0', unit: 'uL/L', status: 'normal' },
-    ] : [
-        { label: 'H2 (氢气)', value: '12.5', unit: 'uL/L', status: 'normal' },
-        { label: 'CH4 (甲烷)', value: '8.2', unit: 'uL/L', status: 'normal' },
-        { label: 'C2H2 (乙炔)', value: '0.1', unit: 'uL/L', status: 'normal' },
-        { label: 'C2H4 (乙烯)', value: '15.4', unit: 'uL/L', status: 'warning' },
-        { label: 'CO (一氧化碳)', value: '280', unit: 'uL/L', status: 'normal' },
-        { label: 'CO2 (二氧化碳)', value: '1450', unit: 'uL/L', status: 'normal' },
-    ];
+    // 健康分与剩余寿命优先取实时评估接口；未及时返回时回退首页同源样本概览值。
+    const healthIndex: number =
+        typeof data?.health_index === 'number' ? data.health_index : (overviewDevice?.health_index ?? 0);
+    const rul: number =
+        typeof data?.predicted_rul === 'number' ? data.predicted_rul : (overviewDevice?.rul_years ?? 0);
+    const riskScore: number =
+        typeof data?.risk_score === 'number' ? data.risk_score : (overviewDevice?.risk_score ?? 0);
 
-    if (loading) return <div className="flex items-center justify-center flex-1 text-cyan-400 animate-pulse">正在载入 AI 分析引擎...</div>;
+    const mergedDga = useMemo(() => {
+        const healthDga = data?.dga_data && Object.keys(data.dga_data).length > 0 ? data.dga_data : {};
+        const sampleGases = dgaSample?.gases ?? {};
+        const out: Record<string, any> = { ...healthDga };
+        GAS_ORDER.forEach((k) => {
+            const sample = sampleGases[k];
+            const current = out[k];
+            const hasCurrent = Array.isArray(current?.values) && current.values.length > 0;
+            if (sample?.values?.length && !hasCurrent) out[k] = sample;
+        });
+        return out;
+    }, [data, dgaSample]);
+
+    const dgaRows = GAS_ORDER
+        .filter((k) => Array.isArray(mergedDga[k]?.values) && mergedDga[k].values.length > 0)
+        .map((k) => ({
+            label: GAS_LABELS[k],
+            latest: Number(mergedDga[k].values.slice(-1)[0]).toFixed(2),
+            count: mergedDga[k].values.length,
+            ts: mergedDga[k].timestamps?.slice(-1)[0] || mergedDga[k].timestamps?.[0] || '样本序列',
+        }));
+
+    const rulLow = rul != null ? Math.max(1, +(rul - 2.2).toFixed(1)) : undefined;
+    const rulHigh = rul != null ? +(rul + 3.0).toFixed(1) : undefined;
+
+    const displayHealth = {
+        ...(data || {}),
+        health_index: healthIndex,
+        predicted_rul: rul,
+        risk_score: riskScore,
+        primary_threat: data?.primary_threat || overviewDevice?.primary_threat || '暂无突出威胁',
+        dga_data: mergedDga,
+    };
+
+    if (loading || !overviewDevice) return <div className="flex items-center justify-center flex-1 text-[#209F84] animate-pulse">正在载入 AI 分析引擎...</div>;
+
+    // 缺陷判定以后端 is_fault 为准（后端正常类中文为"设备正常"，不能用字符串"正常"比较）
+    const isFault = !!defectData?.final_fusion_result?.is_fault;
+    const isSample = defectData?.data_mode?.mode !== 'realtime';
+    const demoNote = defectData?.data_mode?.note as string | undefined;
+
+    const EVIDENCE_CN: Record<string, string> = { bert: '巡检记录', cnn: '油色谱', yolo: '图像检查' };
+    const uaText = rul != null
+        ? `样本估算区间 ${rulLow} ~ ${rulHigh} 年；基于公开样本与确定性健康模型生成，非现场实时采集。`
+        : '样本健康指数已由统一概览口径提供，供趋势研判参考。';
 
     return (
+        <div className="flex flex-col min-h-full">
+            {isSample && demoNote && (
+                <div className="mb-3 px-4 py-2 rounded-lg bg-[#e8f3fe] border border-[#9cc9f4] text-[#3d8fe8] text-[11px] leading-relaxed flex items-start">
+                    <Info className="w-3.5 h-3.5 mr-2 flex-shrink-0 mt-0.5" />
+                    <span>{demoNote}</span>
+                </div>
+            )}
         <div className="flex min-h-full space-x-4">
-            {/* Right: Device Insights (Now Left) */}
+            {/* Left: Device Insights */}
             <div className="w-80 flex flex-col space-y-4">
                 <Card className="glass-panel border-0 bg-transparent h-fit">
                     <CardHeader className="pb-2">
-                        <div className="flex items-center text-cyan-400 text-xs font-bold uppercase mb-2">
+                        <div className="flex items-center text-[#209F84] text-xs font-bold uppercase mb-2">
                             <Info className="w-3 h-3 mr-2" /> 设备摘要
                         </div>
-                        <CardTitle className="text-xl text-white">
-                            {deviceId === 'tr01' ? '1号主变压器' :
-                                deviceId === 'tr02' ? '2号主变压器' :
-                                    deviceId === 'tr03' ? '3号主变压器' : '4号主变压器'}
-                            ({deviceId?.toUpperCase()})
+                        <CardTitle className="text-xl text-[#333333]">
+                            {ledgerInfo?.name ?? '变压器'}
+                            <span className="text-xs text-[#666666] font-normal ml-2">{deviceId?.toUpperCase()}</span>
                         </CardTitle>
                     </CardHeader>
-                    <CardContent className="space-y-4 pt-2">
+                    <CardContent className="space-y-3 pt-2">
                         <div className="flex justify-between text-xs">
-                            <span className="text-gray-500">投运日期</span>
-                            <span className="text-gray-300">2012-05-20</span>
+                            <span className="text-[#666666]">型号</span>
+                            <span className="text-[#333333]">{ledgerInfo?.model ?? '—'}</span>
                         </div>
                         <div className="flex justify-between text-xs">
-                            <span className="text-gray-500">当前健康分</span>
-                            <span className={`font-bold ${data?.health_index < 60 ? 'text-red-400' : 'text-cyan-400'}`}>
-                                {data?.health_index !== undefined ? data.health_index.toFixed(1) : '92.5'}
+                            <span className="text-[#666666]">额定容量 / 电压</span>
+                            <span className="text-[#333333]">{ledgerInfo ? `${ledgerInfo.capacity_mva} MVA · ${ledgerInfo.voltage_kv}kV` : '—'}</span>
+                        </div>
+                        <div className="flex justify-between text-xs">
+                            <span className="text-[#666666]">制造单位</span>
+                            <span className="text-[#333333]">{ledgerInfo?.manufacturer ?? '—'}</span>
+                        </div>
+                        <div className="flex justify-between text-xs">
+                            <span className="text-[#666666]">投运日期</span>
+                            <span className="text-[#333333]">{ledgerInfo?.commission_date ?? '—'}</span>
+                        </div>
+                        <div className="flex justify-between text-xs">
+                            <span className="text-[#666666]">冷却方式</span>
+                            <span className="text-[#333333]">{ledgerInfo?.cooling ?? '—'}</span>
+                        </div>
+                        {ledgerInfo?.serial_no && (
+                            <div className="flex justify-between text-xs">
+                                <span className="text-[#666666]">出厂编号</span>
+                                <span className="text-[#333333]">{ledgerInfo.serial_no}</span>
+                            </div>
+                        )}
+                        {ledgerInfo?.vector_group && (
+                            <div className="flex justify-between text-xs">
+                                <span className="text-[#666666]">接线组别</span>
+                                <span className="text-[#333333]">{ledgerInfo.vector_group}</span>
+                            </div>
+                        )}
+                        {ledgerInfo?.operation_status && (
+                            <div className="flex justify-between text-xs">
+                                <span className="text-[#666666]">运行状态</span>
+                                <span className="text-[#209F84]">{ledgerInfo.operation_status}</span>
+                            </div>
+                        )}
+                        <div className="flex justify-between text-xs pt-2 border-t border-[#dcdfe6]">
+                            <span className="text-[#666666]">当前健康分</span>
+                            <span className={`font-bold ${healthIndex < 60 ? 'text-[#ff5b01]' : 'text-[#209F84]'}`}>
+                                {healthIndex.toFixed(1)}
                             </span>
                         </div>
-                        <div className="p-3 bg-cyan-500/10 rounded-lg border border-cyan-500/20">
-                            <div className="text-[10px] text-cyan-300 font-bold uppercase mb-1">AI 建议</div>
-                            <div className="text-[11px] text-gray-200 leading-relaxed mb-3 italic">
-                                {data?.diagnosis_summary || (data?.primary_threat === "无显著威胁" ? "设备目前整体运行良好。油中 C2H4 有缓慢上升趋势，建议列入常规观察名单。" : "检测到潜在异常，建议加强巡检周期。")}
+                        <div className="flex justify-between text-xs">
+                            <span className="text-[#666666]">预测剩余寿命</span>
+                            <span className="font-bold text-[#333333]">
+                                {rul.toFixed(1)} 年
+                            </span>
+                        </div>
+                        <div className="p-3 bg-[#e6f4f0] rounded-lg border border-[#b3ddd5]">
+                            <div className="text-[10px] text-[#209F84] font-bold uppercase mb-1">AI 建议</div>
+                            <div className="text-[11px] text-[#333333] leading-relaxed mb-3 italic">
+                                {data?.diagnosis_summary || '暂无补充建议，请结合标准评价结论与现场试验结果综合研判。'}
                             </div>
-                            <div className="text-[9px] text-gray-500 mb-2">
-                                <span className="text-cyan-600 font-bold mr-1">置信度量化:</span> {data?.uncertainty_analysis || "常规物理计算"}
+                            <div className="text-[9px] text-[#666666] mb-2">
+                                <span className="text-[#209F84] font-bold mr-1">置信度量化:</span> {uaText}
                             </div>
 
-                            <div className="pt-3 border-t border-white/10">
-                                <div className="text-[10px] text-cyan-300 font-bold uppercase mb-2">三源融合缺陷识别 (D-S)</div>
+                            <div className="pt-3 border-t border-[#dcdfe6]">
+                                <div className="text-[10px] text-[#209F84] font-bold uppercase mb-2">综合缺陷研判</div>
                                 <div className="flex items-center justify-between mb-3">
-                                    <div className="text-sm font-bold text-white">
-                                        判定结果: <span className={defectData?.final_fusion_result?.final_result_cn !== '正常' ? "text-red-400" : "text-green-400"}>
+                                    <div className="text-sm font-bold text-[#333333]">
+                                        判定结果: <span className={`inline-block whitespace-nowrap ${isFault ? "text-[#ff5b01]" : "text-[#5ba83c]"}`}>
                                             {defectData?.final_fusion_result?.final_result_cn || "分析中..."}
                                         </span>
                                     </div>
-                                    <div className="text-[10px] text-gray-400">
-                                        置信度: {(defectData?.final_fusion_result?.final_confidence * 100).toFixed(1)}%
+                                    <div className="text-[10px] text-[#666666]">
+                                        置信度: {((defectData?.final_fusion_result?.final_confidence ?? 0) * 100).toFixed(1)}%
                                     </div>
                                 </div>
                                 <div className="space-y-1.5 mb-3">
-                                    {defectData?.source_evidence && Object.entries(defectData.source_evidence).filter(([k]) => k !== 'image_url').map(([source, text]) => (
-                                        <div key={source} className="flex items-start text-[9px] text-gray-400 leading-tight">
-                                            <span className="text-cyan-500 font-bold mr-1 uppercase">{source}:</span>
+                                    {defectData?.source_evidence && Object.entries(defectData.source_evidence).filter(([k]) => k !== 'image_url' && k !== 'ai_reasoning').map(([source, text]) => (
+                                        <div key={source} className="flex items-start text-[9px] text-[#666666] leading-tight">
+                                            <span className="text-[#209F84] font-bold mr-1">{EVIDENCE_CN[source] ?? source}:</span>
                                             {text as string}
                                         </div>
                                     ))}
                                 </div>
-                                <div className="w-full bg-white/5 h-1 rounded-full overflow-hidden">
+                                <div className="w-full bg-[#f8f8fa] h-1 rounded-full overflow-hidden">
                                     <div
-                                        className="h-full bg-cyan-500"
+                                        className="h-full bg-[#209F84]"
                                         style={{ width: `${(defectData?.final_fusion_result?.final_confidence * 100) || 0}%` }}
                                     />
                                 </div>
@@ -117,73 +249,62 @@ export default function ReasoningHub({ deviceId }: { deviceId?: string }) {
                 </Card>
 
                 <div className="flex-1 glass-panel rounded-xl p-5 flex flex-col overflow-hidden">
-                    <div className="flex items-center mb-4 text-cyan-400">
-                        <History className="w-4 h-4 mr-2" />
-                        <span className="text-sm font-bold uppercase tracking-wider">运维历史</span>
+                    <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center text-[#209F84]">
+                            <History className="w-4 h-4 mr-2" />
+                            <span className="text-sm font-bold uppercase tracking-wider">检修 / 运维历史</span>
+                        </div>
+                        <span className="text-[10px] text-[#666666]">标准样本记录</span>
                     </div>
-                    <div className="flex-1 overflow-y-auto custom-scrollbar space-y-4">
-                        {[
-                            { date: '2025-11-12', event: '预防性维护', tag: 'Routine' },
-                            { date: '2025-06-05', event: '油样取检', tag: 'DGA' },
-                            { date: '2024-12-20', event: '散热器清理', tag: 'Repair' },
-                        ].map((item, i) => (
-                            <div key={i} className="relative pl-4 border-l border-white/10 py-1">
-                                <div className="absolute left-[-4.5px] top-2 w-[8px] h-[8px] rounded-full bg-cyan-500/40 border border-cyan-500" />
-                                <div className="text-[10px] text-gray-500 font-mono mb-1">{item.date}</div>
-                                <div className="text-[11px] text-gray-300 font-semibold">{item.event}</div>
+                    <div className="flex-1 overflow-y-auto custom-scrollbar space-y-2">
+                        {history.length === 0 && (
+                            <p className="text-xs text-[#666666] py-3">暂无历史检修记录。</p>
+                        )}
+                        {history.map((h, i) => (
+                            <div key={i} className="rounded-lg bg-[#f8f8fa] border border-[#dcdfe6] p-3">
+                                <div className="flex items-center justify-between text-[11px]">
+                                    <span className="text-[#209F84] font-medium">{h.type}</span>
+                                    <span className="text-[#666666] tabular-nums">{h.date}</span>
+                                </div>
+                                <p className="text-[11px] text-[#333333] leading-relaxed mt-1.5">{h.result}</p>
+                                <p className="text-[10px] text-[#666666] mt-1">记录人：{h.operator}</p>
                             </div>
                         ))}
                     </div>
                 </div>
             </div>
 
-            {/* Left: Monitoring & Data (Now Middle) */}
+            {/* Middle: Multi-modal evidence + DGA table */}
             <div className="flex-1 flex flex-col space-y-4">
-                <div className="h-[400px] glass-panel rounded-xl overflow-hidden relative">
-                    <div className="absolute inset-0 bg-black/40 flex items-center justify-center overflow-hidden">
-                        <img
-                            src={defectData?.source_evidence?.image_url || "/assets/defects/normal_sample.png"}
-                            alt="Detection Evidence"
-                            className="w-full h-full object-cover opacity-80"
-                        />
-                    </div>
-                    <div className="absolute top-4 left-4 flex items-center bg-black/60 px-3 py-1.5 rounded-full border border-white/10 backdrop-blur-md">
-                        <div className={`w-2 h-2 rounded-full mr-2 ${defectData?.final_fusion_result?.final_result_cn && defectData?.final_fusion_result?.final_result_cn !== '正常' ? 'bg-red-500 led-pulse-red' : 'bg-green-500 led-pulse-green'}`} />
-                        <span className="text-[10px] text-white font-mono uppercase tracking-tighter">
-                            {defectData?.source_evidence?.image_url ? 'Multi-Modal Evidence: Visual Detection' : 'Live Feed: Station-01-Cam3'}
-                        </span>
-                    </div>
-                </div>
-                {/* DGA 组分分析 */}
-                <div className="h-[400px] glass-panel rounded-xl p-5 flex flex-col">
-                    <div className="flex items-center mb-4 text-cyan-400">
-                        <Table className="w-4 h-4 mr-2" />
-                        <span className="text-sm font-bold uppercase tracking-wider">DGA 组分实时分析</span>
+                <ModalityFusion health={displayHealth} defect={defectData} deviceId={deviceId} isSample={isSample} />
+                {/* DGA 组分分析（样本序列） */}
+                <div className="glass-panel rounded-xl p-5 flex flex-col">
+                    <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center text-[#209F84]">
+                            <Table className="w-4 h-4 mr-2" />
+                            <span className="text-sm font-bold uppercase tracking-wider">DGA 组分样本序列</span>
+                        </div>
+                        <span className="text-[10px] text-[#666666]">油色谱标准样本序列</span>
                     </div>
                     <div className="flex-1 overflow-y-auto custom-scrollbar">
                         <table className="w-full text-left">
-                            <thead className="text-[11px] text-gray-500 uppercase border-b border-white/5">
+                            <thead className="text-[11px] text-[#666666] uppercase border-b border-[#dcdfe6]">
                                 <tr>
                                     <th className="pb-2 font-medium">监测项目</th>
-                                    <th className="pb-2 font-medium">当前数值</th>
-                                    <th className="pb-2 font-medium">运行趋势</th>
+                                    <th className="pb-2 font-medium">样本最新值</th>
+                                    <th className="pb-2 font-medium">样本趋势</th>
                                 </tr>
                             </thead>
                             <tbody className="text-xs">
-                                {dgaData.map((item, i) => (
-                                    <tr key={i} className="border-b border-white/5 last:border-0 hover:bg-white/5 transition-colors group">
-                                        <td className="py-3 text-gray-300 font-medium">{item.label}</td>
+                                {dgaRows.map((item) => (
+                                    <tr key={item.label} className="border-b border-[#dcdfe6] last:border-0 hover:bg-[#f8f8fa] transition-colors">
+                                        <td className="py-3 text-[#333333] font-medium">{item.label}</td>
                                         <td className="py-3">
-                                            <span className="text-gray-200">{item.value}</span>
-                                            <span className="ml-1 text-[10px] text-gray-500">{item.unit}</span>
+                                            <span className="text-[#333333] font-mono">{item.latest}</span>
+                                            <span className="ml-1 text-[10px] text-[#666666]">µL/L</span>
                                         </td>
-                                        <td className="py-3">
-                                            <div className={`w-12 h-1 rounded-full ${item.status === 'warning' ? 'bg-amber-500/50' : 'bg-green-500/50'}`}>
-                                                <div
-                                                    className={`h-full rounded-full ${item.status === 'warning' ? 'bg-amber-400' : 'bg-green-400'}`}
-                                                    style={{ width: item.status === 'warning' ? '80%' : '40%' }}
-                                                />
-                                            </div>
+                                        <td className="py-3 text-[#666666] text-[11px]">
+                                            {item.count} 个采样点 · 最新时刻 {item.ts}
                                         </td>
                                     </tr>
                                 ))}
@@ -193,37 +314,59 @@ export default function ReasoningHub({ deviceId }: { deviceId?: string }) {
                 </div>
             </div>
 
-            {/* Middle: Reasoning & Chat (Now Right) */}
+            {/* Right: Reasoning & Chat */}
             <div className="w-[450px] flex flex-col space-y-4">
-                {/* 健康度演化 */}
-                <div className="h-[300px] glass-panel rounded-xl p-5">
+                {/* 健康度演化 + 剩余寿命不确定度 */}
+                <div className="glass-panel rounded-xl p-5">
                     <div className="flex items-center justify-between mb-4">
-                        <div className="flex items-center text-cyan-400">
+                        <div className="flex items-center text-[#209F84]">
                             <BarChart3 className="w-4 h-4 mr-2" />
                             <span className="text-sm font-bold uppercase tracking-wider">健康度演化曲线</span>
                         </div>
-                        <span className="text-[10px] text-gray-500">生命周期推演</span>
+                        <span className="text-[10px] text-[#666666]">剩余寿命趋势测算</span>
                     </div>
-                    <div className="h-[calc(100%-2rem)]">
+                    <div className="h-[220px]">
                         <ResponsiveContainer width="100%" height="100%">
                             <LineChart data={hiData}>
-                                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
-                                <XAxis dataKey="name" stroke="#4a5568" fontSize={10} tickLine={false} axisLine={false} />
-                                <YAxis stroke="#4a5568" fontSize={10} tickLine={false} axisLine={false} domain={[0, 100]} />
+                                <CartesianGrid strokeDasharray="3 3" stroke="#ebeef5" vertical={false} />
+                                <XAxis dataKey="name" stroke="#666666" fontSize={10} tickLine={false} axisLine={false} />
+                                <YAxis stroke="#666666" fontSize={10} tickLine={false} axisLine={false} domain={[0, 100]} />
                                 <Tooltip
-                                    contentStyle={{ backgroundColor: '#1a202c', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', color: '#fff' }}
-                                    itemStyle={{ color: '#00d0ff' }}
+                                    contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #dcdfe6', borderRadius: '8px', color: '#333333' }}
+                                    itemStyle={{ color: '#209F84' }}
                                 />
-                                <Line type="monotone" dataKey="HI" stroke="#00d0ff" strokeWidth={2} dot={{ fill: '#00d0ff', r: 3 }} activeDot={{ r: 5, strokeWidth: 0 }} />
+                                <Line type="monotone" dataKey="HI" stroke="#209F84" strokeWidth={2} dot={{ fill: '#209F84', r: 3 }} activeDot={{ r: 5, strokeWidth: 0 }} />
                             </LineChart>
                         </ResponsiveContainer>
+                    </div>
+                    <div className="mt-3 pt-3 border-t border-[#dcdfe6] grid grid-cols-3 gap-2 text-center">
+                        <div>
+                            <div className="text-[9px] text-[#666666] uppercase">剩余寿命趋势</div>
+                            <div className="text-sm font-bold text-[#333333]">{rul.toFixed(1)}</div>
+                            <div className="text-[9px] text-[#666666]">年 · 样本测算</div>
+                        </div>
+                        <div>
+                            <div className="text-[9px] text-[#666666] uppercase">样本估算区间</div>
+                            <div className="text-sm font-bold text-[#333333]">{rulLow}~{rulHigh}</div>
+                            <div className="text-[9px] text-[#666666]">年 · 确定性口径</div>
+                        </div>
+                        <div>
+                            <div className="text-[9px] text-[#666666] uppercase">综合风险评分</div>
+                            <div className="text-sm font-bold text-[#333333]">{riskScore.toFixed(1)}</div>
+                            <div className="text-[9px] text-[#666666]">分 · 油色谱联动</div>
+                        </div>
                     </div>
                 </div>
                 {/* AI 助手 */}
                 <div className="min-h-[500px] flex-1 glass-panel rounded-xl overflow-hidden">
-                    <AIChat />
+                    <AIChat onNavigate={onNavigateAgent} />
                 </div>
             </div>
+        </div>
+        {/* 报告闭环（五段流程 + 一键生成报告视图） */}
+        <div className="mt-4">
+            <ReportWorkorder deviceId={deviceId} health={displayHealth} defect={defectData} />
+        </div>
         </div>
     );
 }

@@ -1,72 +1,19 @@
-// Simple fetch wrapper to the backend API or returning mock data
+// HTTP wrapper to the real Python backend (FastAPI :8000).
+// 同源相对路径：构建后 SPA 由 FastAPI 直接托管；npm run dev 时 Vite 把 /api、/edge 代理到 :8000。
+export const API_BASE = "";
 
-const isMock = false; // Set to false to connect to the real Python backend at localhost:8000
-
-export const API_BASE = "http://localhost:8000";
-
-export const assessHealth = async (data: any) => {
-    if (isMock) {
-        // Return a mocked response closely resembling what the engine would produce
-        return new Promise(resolve => {
-            setTimeout(() => {
-                resolve({
-                    "health_index": 82.5,
-                    "predicted_rul": 24.3,
-                    "risk_score": 12.5,
-                    "primary_threat": "无显著威胁",
-                    "fault_breakdown": [
-                        { "type": "过热故障", "probability": 15 },
-                        { "type": "放电故障", "probability": 8 }
-                    ],
-                    "health_deduction_curve": {
-                        "x": [2026, 2031, 2036, 2041, 2046, 2051],
-                        "y": [82.5, 75, 62, 50, 35, 12]
-                    },
-                    "fault_risk_curve": {
-                        "x": [2026, 2027, 2028, 2029, 2030, 2031, 2032],
-                        "y": [12.5, 14, 18, 25, 33, 45, 60]
-                    }
-                });
-            }, 1500);
-        });
-    }
-
-    const response = await fetch("http://localhost:8000/api/assess/health", {
+const jsonPost = async (path: string, body: unknown) => {
+    const response = await fetch(`${API_BASE}${path}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data)
+        body: JSON.stringify(body),
     });
     return response.json();
 };
 
-export const assessDefect = async (data: any) => {
-    if (isMock) {
-        return new Promise(resolve => {
-            setTimeout(() => {
-                const res = {
-                    "final_fusion_result": {
-                        "final_result_cn": data.id === 'tr01' ? "起火" : (data.id === 'tr02' ? "漏油" : "正常"),
-                        "final_confidence": data.id === 'tr01' ? 0.9821 : (data.id === 'tr02' ? 0.9421 : 0.9950),
-                        "is_definite": true,
-                    },
-                    "source_evidence": {
-                        "bert": data.id === 'tr01' ? "日志检测到：设备温度急剧上升，触发火灾告警" : (data.id === 'tr02' ? "日志检测到：变压器外壳出现油污记录" : "日志记录：设备运行参数一切正常"),
-                        "cnn": "油色谱分析：组分比例正常",
-                        "yolo": data.id === 'tr01' ? "视觉检测成果：识别到明显明火及浓烟" : (data.id === 'tr02' ? "视觉检测成果：在变压器基座检测到显著油污喷溅" : "视觉检测成果：设备外观清洁度正常"),
-                        "image_url": data.id === 'tr01' ? "/assets/defects/fire_defect.png" : (data.id === 'tr02' ? "/assets/defects/oil_leakage.png" : "/assets/defects/normal_sample.png")
-                    }
-                };
-                resolve(res);
-            }, 1000);
-        });
-    }
-    const response = await fetch("http://localhost:8000/api/assess/defect", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data)
-    });
-    return response.json();
-}
+export const assessHealth = (data: any) => jsonPost("/api/assess/health", data);
+
+export const assessDefect = (data: any) => jsonPost("/api/assess/defect", data);
 
 // ===========================================================================
 // Multi-agent platform (Supervisor) — the refactored Tool/Skill/Agent stack
@@ -74,10 +21,76 @@ export const assessDefect = async (data: any) => {
 
 export type ToolCall = { name: string; args: Record<string, any> };
 
+// Fixed closed vocabularies — mirror the backend planner/guard enums.
+export type IntentId =
+    | 'defect_detection'
+    | 'dga_interpretation'
+    | 'history_query'
+    | 'knowledge_retrieval'
+    | 'diagnosis'
+    | 'report_workorder'
+    | 'chitchat';
+
+export type RoleId = 'perception' | 'diagnosis' | 'compliance' | 'decision' | 'knowledge';
+
+export type StepStatus = 'pending' | 'running' | 'done' | 'error';
+
+export type IntentInfo = {
+    intent: IntentId;
+    label: string;
+    confidence: number;
+    source: 'rule' | 'llm';
+    needs_plan: boolean;
+};
+
+export type PlanStep = {
+    step_id: string;
+    label: string;
+    tool: string;
+    role: RoleId;
+    reason: string;
+    status: StepStatus;
+    args?: Record<string, any>;
+};
+
+export type Plan = { steps: PlanStep[] };
+
+export type GuardCheck = {
+    claim: string;
+    grounded: boolean;
+    detail: string;
+};
+
+export type GuardResult = {
+    passed: boolean;
+    action: 'pass' | 'blocked' | 'corrected';
+    checks: GuardCheck[];
+    message: string;
+};
+
+// One real per-image detection carried by the evidence event/field.
+export type EvidenceDetection = {
+    class: string;
+    confidence: number;
+};
+
+export type EvidenceRecord = {
+    image_index: number;
+    tool: string;
+    online: boolean;
+    ok: boolean;
+    summary: string;
+    detections: EvidenceDetection[];
+};
+
 export type AgentChatResp = {
     session_id: string;
     answer: string;
     tool_calls: ToolCall[];
+    intent?: IntentInfo | null;
+    plan?: Plan | null;
+    guard?: GuardResult | null;
+    evidence?: EvidenceRecord[];
 };
 
 export type CatalogueItem = { name: string; description: string; disabled?: boolean; builtin?: boolean };
@@ -106,25 +119,35 @@ export const agentChat = async (
 
 export type AgentStreamEvent =
     | { type: "session"; session_id: string }
+    | { type: "intent"; intent: IntentId; label: string; confidence: number; source: 'rule' | 'llm'; needs_plan: boolean }
+    | { type: "plan"; steps: PlanStep[] }
+    | { type: "evidence"; records: EvidenceRecord[] }
     | { type: "text"; delta: string }
-    | { type: "tool_call"; name: string; args: Record<string, any> }
-    | { type: "tool_result"; name: string; ok: boolean }
+    | { type: "tool_call"; name: string; args: Record<string, any>; step_id?: string; role?: RoleId; title?: string }
+    | { type: "tool_result"; name: string; ok: boolean; step_id?: string; role?: RoleId }
+    | { type: "guard"; passed: boolean; action: 'pass' | 'blocked' | 'corrected'; checks: GuardCheck[]; message: string }
     | { type: "final"; answer: string; tool_calls: ToolCall[] }
     | { type: "error"; message: string }
     | { type: "end" };
 
 /** Stream one chat turn. Calls `onEvent` for each SSE event. Returns when the
- * stream ends. EventSource only supports GET, so we POST + parse the body. */
+ * stream ends. EventSource only supports GET, so we POST + parse the body.
+ * `imagePaths` are local paths returned by agentUploadImage. */
 export const agentChatStream = async (
     message: string,
     sessionId: string | undefined,
     onEvent: (ev: AgentStreamEvent) => void,
     signal?: AbortSignal,
+    imagePaths?: string[],
 ): Promise<void> => {
     const resp = await fetch(`${API_BASE}/api/agent/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, session_id: sessionId ?? null }),
+        body: JSON.stringify({
+            message,
+            session_id: sessionId ?? null,
+            image_paths: imagePaths ?? [],
+        }),
         signal,
     });
     if (!resp.ok || !resp.body) {
@@ -316,7 +339,7 @@ export const dltIotdbImport = async (
     const r = await fetch(
         `${API_BASE}/api/dlt1685/iotdb_import?equipment_id=${encodeURIComponent(equipmentId)}&substation=${encodeURIComponent(substation)}`,
     );
-    if (!r.ok) throw new Error(`IoTDB 导入失败 (${r.status})`);
+    if (!r.ok) throw new Error(`测点数据导入失败，请检查数据文件后重试（状态码 ${r.status}）`);
     return r.json();
 };
 
@@ -355,3 +378,474 @@ export const dltDiagnose = async (
     }
     return r.json();
 };
+
+// ===========================================================================
+// Image upload and on-site visual analysis proxy.
+// ===========================================================================
+
+export type UploadedImage = {
+    path: string;
+    filename: string;
+    size: number;
+    url: string;
+};
+
+/** Upload one image to the brain. Returns the local path the edge tools read
+ * (same host) and a same-origin URL for in-chat preview. */
+export const agentUploadImage = async (file: File): Promise<UploadedImage> => {
+    const form = new FormData();
+    form.append("file", file);
+    const r = await fetch(`${API_BASE}/api/agent/upload`, {
+        method: "POST",
+        body: form,
+    });
+    if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d?.detail || `图片上传失败 (${r.status})`);
+    }
+    return r.json();
+};
+
+// ---- edge gateway types ----
+
+export type EdgeCamera = {
+    id: string;
+    name: string;
+    location: string;
+    rtsp_url: string;
+    status: string;
+    algorithms: string[];
+    create_time?: string;
+};
+
+export type DemoSource = { name: string; source: string };
+
+export type DemoSourcesResp = {
+    dir: string;
+    available: boolean;
+    sources: DemoSource[];
+};
+
+const edgeGet = async <T>(path: string): Promise<T> => {
+    const r = await fetch(`${API_BASE}${path}`);
+    if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d?.detail || `请求失败 (${r.status})`);
+    }
+    return r.json();
+};
+
+const edgePost = async <T>(path: string, body?: unknown): Promise<T> => {
+    const r = await fetch(`${API_BASE}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d?.detail || `请求失败 (${r.status})`);
+    }
+    return r.json();
+};
+
+export const edgeDemoSources = () =>
+    edgeGet<DemoSourcesResp>("/api/edge/demo_sources");
+
+export const edgeCameras = () => edgeGet<EdgeCamera[]>("/edge/api/cameras");
+
+export type StreamStartResp = {
+    success: boolean;
+    cam_id: string;
+    stream_url: string;
+};
+
+/** Start a camera preview. `source` is a prepared sample video or an approved
+ * live address supplied by the operations team. */
+export const edgeStreamStart = (
+    camId: string,
+    source: string,
+    modelType: string,
+) =>
+    edgePost<StreamStartResp>(`/edge/api/stream/start/${camId}`, {
+        source,
+        model_type: modelType,
+    });
+
+export const edgeStreamStop = (camId: string) =>
+    edgePost<{ success: boolean }>(
+        `/edge/api/stream/stop/${camId}`,
+    );
+
+/** Browser URL for a running MJPEG stream (proxied through the brain). */
+export const edgeStreamUrl = (camId: string) =>
+    `${API_BASE}/edge/api/stream/${camId}`;
+
+/** Browser URL for a single JPEG snapshot. */
+export const edgeSnapshotUrl = (camId: string) =>
+    `${API_BASE}/edge/api/cameras/${camId}/snapshot`;
+
+// ---- real edge alarms (replaces the old fabricated warning stream) ----
+
+export type EdgeAlarm = {
+    id: string;
+    camera_id: string;
+    camera_name: string;
+    algorithm_id: string;
+    algorithm_name: string;
+    image_url: string;
+    result: string;
+    confidence: number;
+    severity: string;
+    review_status: string;
+    review_result: string;
+    create_time: string;
+};
+
+/** Fetch the real edge alarm list through the brain gateway. */
+export const edgeAlarms = (): Promise<EdgeAlarm[]> =>
+    edgeGet<EdgeAlarm[]>("/edge/api/alarms");
+
+// ===========================================================================
+// 综合评估首页聚合（台账 / 健康概览 / 多模态样本 / 工单台账 / 标准评价回写）
+// ===========================================================================
+
+export type SourceInfo = {
+    code: string;
+    label: string;
+    realtime: boolean;
+    dataset_dir?: string;
+};
+
+export type SeriesXY = { x: Array<number | string>; y: number[] };
+
+export type FleetDevice = {
+    equipment_id: string;
+    name: string;
+    station_id: string;
+    station_name: string;
+    health_index: number;
+    rul_years: number;
+    risk_score: number;
+    primary_threat: string | null;
+    fusion_verdict: string;
+    status: "正常" | "关注" | "异常" | "严重" | string;
+    dlt_state: string | null;
+    dlt_deduction: number | null;
+    dlt_updated_at?: string | null;
+    open_orders: number;
+    modal_status: { ir: string; pd: string; vib: string };
+    model: string;
+    commission_date: string;
+    risk_curve: SeriesXY;
+    health_curve: SeriesXY;
+};
+
+export type FleetStation = {
+    id: string;
+    name: string;
+    voltage_kv: number;
+    devices: FleetDevice[];
+};
+
+export type FleetOverview = {
+    generated_at: string;
+    data_source: SourceInfo;
+    stations: FleetStation[];
+    summary: {
+        device_total: number;
+        status_counts: Record<string, number>;
+        open_orders: number;
+        avg_hi: number;
+    };
+    fleet_risk_curve: SeriesXY;
+    fleet_hi_curve: SeriesXY;
+    maintenance_history: Record<string, Array<{ date: string; type: string; result: string; operator: string }>>;
+};
+
+export type Workorder = {
+    order_no: string;
+    equipment_id: string;
+    equipment_name: string;
+    station_id: string;
+    work_type: string;
+    summary: string;
+    conclusion?: string;
+    priority: string;
+    assignee_team: string;
+    status: string;
+    health_index?: number | null;
+    created_at: string;
+    signed: boolean;
+    note: string;
+    data_source?: SourceInfo;
+};
+
+export type Ledger = {
+    equipment_id: string;
+    name: string;
+    station_name: string;
+    model: string;
+    voltage_kv: number;
+    capacity_mva: number;
+    manufacturer: string;
+    commission_date: string;
+    cooling: string;
+    oil_volume_m3: number;
+    serial_no?: string | null;
+    vector_group?: string | null;
+    insulation_level?: string | null;
+    tap_changer_model?: string | null;
+    operation_status?: string | null;
+    last_maintenance_date?: string | null;
+    remark?: string | null;
+    data_source: SourceInfo;
+};
+
+export type ModalSample = {
+    kind: string;
+    title: string;
+    overall_status: string;
+    data_source: SourceInfo;
+    [k: string]: any;
+};
+
+export type DeviceModalities = {
+    equipment_id: string;
+    ir: ModalSample;
+    pd: ModalSample;
+    vib: ModalSample;
+    temp_load: ModalSample;
+    data_source: SourceInfo;
+};
+
+export type DgaGasSeries = { values: number[]; timestamps: string[]; unit: string };
+
+export type DgaPublicSeries = {
+    equipment_id: string;
+    sample_count: number;
+    dates: string[];
+    gases: Record<string, DgaGasSeries>;
+    latest: Record<string, number>;
+    condition_label: string;
+    diagnosis_basis: string;
+    oil_temp_c?: string | null;
+    load_rate_pct?: string | null;
+    note: string;
+    data_source: SourceInfo;
+};
+
+export type ReviewTask = {
+    id: string;
+    title: string;
+    device_id: string;
+    device: string;
+    station: string;
+    time: string;
+    desc: string;
+    health: number;
+    risk: number;
+    status_level: string;
+    decision?: 'approved' | 'rejected' | null;
+    decision_note?: string;
+    decided_at?: string;
+};
+
+export type DatasetSource = {
+    source_id: string;
+    title: string;
+    publisher: string;
+    url: string;
+    role: string;
+};
+
+export type DatasetManifest = {
+    manifest_version?: string;
+    generated_at?: string;
+    disclaimer: string;
+    source_count: number;
+    sources: DatasetSource[];
+    data_source: SourceInfo;
+};
+
+export type CaSealInfo = {
+    available: boolean;
+    seal_image: string | null;
+    issued_by: string;
+    issued_at?: string;
+    note: string;
+    data_source: SourceInfo;
+};
+
+/** 聚合接口允许后端短暂不可用：返回 null 由前端渲染“稍后重试”空状态，不抛白屏。 */
+const safeGet = async <T,>(path: string): Promise<T | null> => {
+    try {
+        const r = await fetch(`${API_BASE}${path}`);
+        if (!r.ok) return null;
+        return (await r.json()) as T;
+    } catch {
+        return null;
+    }
+};
+
+const safePost = async <T,>(path: string, body?: unknown): Promise<T | null> => {
+    try {
+        const r = await fetch(`${API_BASE}${path}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: body === undefined ? undefined : JSON.stringify(body),
+        });
+        if (!r.ok) return null;
+        return (await r.json()) as T;
+    } catch {
+        return null;
+    }
+};
+
+export const fleetOverview = () => safeGet<FleetOverview>("/api/fleet/overview");
+export const deviceLedger = (id: string) => safeGet<Ledger>(`/api/fleet/devices/${id}/ledger`);
+export const deviceModalities = (id: string) => safeGet<DeviceModalities>(`/api/fleet/devices/${id}/modalities`);
+export const deviceDga = (id: string) => safeGet<DgaPublicSeries>(`/api/fleet/devices/${id}/dga`);
+export const deviceHistory = (id: string) =>
+    safeGet<{ equipment_id: string; records: Array<{ date: string; type: string; result: string; operator: string }> }>(
+        `/api/fleet/devices/${id}/history`,
+    );
+export const listWorkorders = () => safeGet<{ total: number; open: number; items: Workorder[] }>("/api/fleet/workorders");
+
+export const createWorkorder = (body: {
+    equipment_id: string;
+    work_type: string;
+    summary?: string;
+    assignee_team?: string;
+    priority?: string;
+    health_index?: number;
+    conclusion?: string;
+}) => safePost<{ ok: boolean; order: Workorder }>("/api/fleet/workorders", body);
+
+export const advanceWorkorder = (orderNo: string, status: string) =>
+    safePost<{ ok: boolean; order: Workorder }>(`/api/fleet/workorders/${encodeURIComponent(orderNo)}/status`, { status });
+
+export const recordDltResult = (body: {
+    equipment_id: string;
+    overall_state?: string | null;
+    health_index?: number | null;
+    total_deduction?: number | null;
+    components?: Record<string, any>;
+}) => safePost<{ ok: boolean; equipment_id: string }>("/api/fleet/dlt_result", body);
+
+export const reviewTasks = () => safeGet<{ items: ReviewTask[]; data_source: SourceInfo }>("/api/fleet/review_tasks");
+export const fleetDatasetManifest = () => safeGet<DatasetManifest>("/api/fleet/dataset_manifest");
+export const fleetCaSeal = () => safeGet<CaSealInfo>("/api/fleet/ca_seal");
+
+export const submitReviewDecision = (taskId: string, decision: 'approved' | 'rejected', note = '') =>
+    safePost<{ ok: boolean; task_id: string; decision: { decision: string; note: string; decided_at: string } }>(
+        `/api/fleet/review_tasks/${encodeURIComponent(taskId)}/decision`,
+        { decision, note },
+    );
+
+export type Team = { id: string; name: string; skill: string };
+export const fleetTeams = () => safeGet<Team[]>("/api/fleet/teams");
+
+// ===========================================================================
+// 中台（知识平台 :5000）同源网关 —— 供“知识管理”栏目原生取数
+// ===========================================================================
+
+const middleGet = async <T,>(path: string): Promise<T | null> => {
+    try {
+        const r = await fetch(`${API_BASE}${path}`);
+        if (!r.ok) return null;
+        return (await r.json()) as T;
+    } catch {
+        return null;
+    }
+};
+
+const middlePost = async <T,>(path: string, body?: unknown): Promise<T | null> => {
+    try {
+        const r = await fetch(`${API_BASE}${path}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: body === undefined ? undefined : JSON.stringify(body),
+        });
+        if (!r.ok) return null;
+        return (await r.json()) as T;
+    } catch {
+        return null;
+    }
+};
+
+export type MiddleDatasetSummary = {
+    ok: boolean;
+    summary: {
+        total_files: number;
+        pdf_count: number;
+        image_count: number;
+        category_count: number;
+        custom_category_count: number;
+        unknown_name_count: number;
+        new_files_7d: number;
+        deleted_count: number;
+    };
+};
+
+export type MiddlePdfItem = {
+    id?: string;
+    name: string;
+    file_type?: string;
+    category?: string;
+    content_lv1?: string;
+    size?: number;
+    upload_time?: string | number;
+    [k: string]: any;
+};
+
+export type MiddleQaResp = {
+    ok?: boolean;
+    answer?: string;
+    cited_answer?: string;
+    citation_references?: Array<{ title?: string; [k: string]: any }>;
+    answer_sources?: string[];
+    evidence_chunks?: any[];
+    [k: string]: any;
+};
+
+export const middleDatasetSummary = () =>
+    middleGet<MiddleDatasetSummary>("/middle/api/datasets/summary");
+
+export const middleDatasetDistribution = () =>
+    middleGet<Record<string, any>>("/middle/api/datasets/distribution");
+
+export const middlePdfs = () =>
+    middleGet<{ ok?: boolean; pdfs?: MiddlePdfItem[]; items?: MiddlePdfItem[] } | MiddlePdfItem[]>(
+        "/middle/api/pdfs",
+    );
+
+export const middleGraphOverview = () =>
+    middleGet<Record<string, any>>("/middle/api/graph/overview");
+
+export const middleQaAsk = (question: string) =>
+    middlePost<MiddleQaResp>("/middle/api/qa/ask", { question });
+
+// ===========================================================================
+// 边缘（:8080）系统管理取数 —— 供“系统管理”栏目原生取数
+// ===========================================================================
+
+export const edgeModelStats = () =>
+    edgeGet<Record<string, any>>("/edge/api/model/stats").catch(() => null);
+
+export const edgeSystemStats = () =>
+    edgeGet<Record<string, any>>("/edge/api/system/stats").catch(() => null);
+
+export const edgeGpuStatus = () =>
+    edgeGet<Record<string, any>>("/edge/api/gpu_status").catch(() => null);
+
+export const edgeHalProbe = () =>
+    edgeGet<Record<string, any>>("/edge/api/hal/probe").catch(() => null);
+
+export const edgeUsers = () =>
+    edgeGet<Record<string, any>>("/edge/api/users").catch(() => null);
+
+export const edgeLlmStatus = () =>
+    edgeGet<Record<string, any>>("/edge/api/llm/status").catch(() => null);
+
+export const edgeHealth = () =>
+    edgeGet<{ status?: string; [k: string]: any }>("/edge/health").catch(() => null);

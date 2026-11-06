@@ -15,10 +15,10 @@ export default function HealthRadar({ data = defaultData }: { data?: any[] }) {
         <div className="w-full h-full min-h-[300px]">
             <ResponsiveContainer width="100%" height="100%">
                 <RadarChart cx="50%" cy="50%" outerRadius="80%" data={data}>
-                    <PolarGrid stroke="rgba(255,255,255,0.1)" />
+                    <PolarGrid stroke="#dcdfe6" />
                     <PolarAngleAxis
                         dataKey="subject"
-                        tick={{ fill: '#94a3b8', fontSize: 12 }}
+                        tick={{ fill: '#666666', fontSize: 12 }}
                     />
                     <PolarRadiusAxis
                         angle={30}
@@ -29,8 +29,8 @@ export default function HealthRadar({ data = defaultData }: { data?: any[] }) {
                     <Radar
                         name="健康状态"
                         dataKey="A"
-                        stroke="#00d0ff"
-                        fill="#00d0ff"
+                        stroke="#209F84"
+                        fill="#209F84"
                         fillOpacity={0.3}
                     />
                 </RadarChart>
